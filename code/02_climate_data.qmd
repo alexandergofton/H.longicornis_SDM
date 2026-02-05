@@ -1,0 +1,155 @@
+---
+title: "Get climate data"
+author: "Alexander W. Gofton"
+date: today
+date-format: "D MMMM YYYY"
+format:
+  html:
+    page-layout: full
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    code-tools: true
+    embed-resources: true
+    theme:
+      light: cosmo
+      dark: darkly
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+
+
+```{r setup}
+setwd("~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM")
+library(tidyverse)
+library(geodata)
+library(terra)
+library(sf)
+```
+
+
+## Downlaod WorldClim bioclimatic variables
+```{r download_worldClim_vars}
+# Resolution options: 10 (very high, ~340m), 5 (~1km), 2.5 (~5km), 0.5 (~1km but global)
+# For Australia, I'd recommend 2.5 or 5 minutes
+
+bioclim <- worldclim_global(var = "bio",
+                            res = 2.5,  # 2.5 minute resolution (~5km)
+                            path = "data/worldclim")  # where to save
+```
+
+```{r}
+# Load the raster data
+#bioclim <- rast(bioclim)
+
+# Load the raster data using the correct relative path
+bioclim <- rast(paste0("data/worldclim/",
+                      c("climate/wc2.1_2.5m/wc2.1_2.5m_bio_1.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_2.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_3.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_4.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_5.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_6.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_7.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_8.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_9.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_10.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_11.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_12.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_13.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_14.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_15.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_16.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_17.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_18.tif",
+                        "climate/wc2.1_2.5m/wc2.1_2.5m_bio_19.tif")))
+```
+
+```{r}
+# Check what you got
+print(bioclim)
+nlyr(bioclim)  # Should show 19 layers (bio1-bio19)
+```
+
+## Load occurence data
+```{r}
+occurrences <- read.csv("processed_data/thinned_data_thin1.csv")
+
+# Convert to spatial object
+occ_spatial <- vect(occurrences,
+                    geom = c("lon", "lat"),
+                    crs = "EPSG:4326")
+```
+
+```{r}
+# Quick check - plot on your climate data
+plot(bioclim[[1]])
+points(occ_spatial, pch = 16, col = "red", cex = 0.5)
+```
+
+## Extract climatic values at occurence points
+```{r}
+# Make sure your occurrence points match the climate data CRS
+occ_spatial <- project(occ_spatial, crs(bioclim))
+
+# Extract climate values
+occ_climate <- extract(bioclim, occ_spatial)
+
+# Add back to your dataframe
+occurrences <- cbind(occurrences, occ_climate)
+
+# Quick check - look at climate space
+hist(occurrences$wc2.1_2.5m_bio_1,
+     main = "Annual Mean Temperature at Occurrence Points",
+     xlab = "Temperature (°C × 10)")
+```
+
+## Saving data
+
+```{r}
+# Save your cropped bioclim data
+# This saves all 19 layers in one file
+writeRaster(bioclim,
+            filename = "processed_data/bioclim.tif",
+            overwrite = TRUE)
+
+# Or save as RDS (R's native format - faster to load)
+saveRDS(bioclim, "processed_data/bioclim.rds")
+
+# To reload later:
+#bioclim_aus_nz <- rast("data/processed/bioclim_aus_nz.tif")
+# OR
+#bioclim_aus_nz <- readRDS("data/processed/bioclim_aus_nz.rds")
+```
+
+```{r}
+# Save occurnce data
+write.csv(occurrences,
+          "processed_data/occurrences_thinned.csv",
+          row.names = FALSE)
+
+# As RDS (preserves R object structure better)
+saveRDS(occurrences, "processed_data/occurrences_thinned.rds")
+
+# If it's a spatial object (SpatVector)
+writeVector(occ_spatial,
+            "processed_data/occurrences_thinned.gpkg",
+            overwrite = TRUE)
+
+# To reload:
+#occurrences <- read.csv("processed_data/occurrences_thinned.csv")
+# OR
+#occurrences <- readRDS("processed_data/occurrences_thinned.rds")
+# OR
+#occ_spatial <- vect("processed_data/occurrences_thinned.gpkg")
+```
+
+# Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

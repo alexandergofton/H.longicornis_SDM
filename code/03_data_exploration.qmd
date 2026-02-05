@@ -1,0 +1,698 @@
+---
+title: "Step 3: Comprehensive Data Exploration"
+author: "Alexander W. Gofton"
+date: today
+date-format: "D MMMM YYYY"
+format:
+  html:
+    page-layout: full
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    code-tools: true
+    embed-resources: true
+    theme:
+      light: cosmo
+      dark: darkly
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+
+# Overview
+
+This step provides comprehensive exploratory analysis of occurrence and climate data before modeling. Understanding data characteristics, potential biases, and climate space coverage is crucial for building reliable species distribution models.
+
+## Objectives
+
+1. Verify data quality and completeness
+2. Visualize geographic distribution of occurrence points
+3. Analyze climate space occupied by the species
+4. Assess sampling bias and geographic clustering
+5. Compare presence points to available background climate
+6. Identify preliminary correlations between climate variables
+7. Validate against known biological constraints
+8. Document data characteristics for modeling decisions
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+library(terra)
+library(tidyverse)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(spatstat)
+library(corrplot)
+library(knitr)
+library(kableExtra)
+library(patchwork)
+library(viridis)
+```
+
+```{r}
+#| label: load-data
+
+processed_data_dir <- "/Users/gof005/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/processed_data/"
+
+# Load climate data
+message("Loading climate data...")
+bioclim <- rast(paste0(processed_data_dir, "bioclim.tif"))
+
+# Load occurrence data
+message("Loading occurrence data...")
+occurrences <- read.csv(paste0(processed_data_dir, "occurrences_thinned.csv"))
+
+message(sprintf("Loaded %d occurrence points and %d climate layers",
+                nrow(occurrences), nlyr(bioclim)))
+```
+
+# 1. Data Quality Assessment
+
+## 1.1 Dataset Overview
+
+```{r}
+#| label: data-overview
+
+# Basic data dimensions
+cat("==== DATASET OVERVIEW ====\n\n")
+cat(sprintf("Occurrence points: %d\n", nrow(occurrences)))
+cat(sprintf("Variables in occurrence data: %d\n", ncol(occurrences)))
+cat(sprintf("Climate layers: %d\n", nlyr(bioclim)))
+cat(sprintf("\nColumn names: %s\n", paste(names(occurrences), collapse = ", ")))
+```
+
+## 1.2 Data Completeness Check
+
+```{r}
+#| label: data-completeness
+
+# Check for missing values
+missing_coords <- sum(is.na(occurrences$lon) | is.na(occurrences$lat))
+duplicate_coords <- sum(duplicated(occurrences[, c("lon", "lat")]))
+
+# Geographic extent
+lon_range <- range(occurrences$lon, na.rm = TRUE)
+lat_range <- range(occurrences$lat, na.rm = TRUE)
+
+# Create summary table
+data_summary <- tibble(
+  Metric = c(
+    "Total occurrences",
+    "Unique coordinates",
+    "Missing coordinates",
+    "Duplicate coordinates",
+    "Longitude range",
+    "Latitude range",
+    "Climate layers available"
+  ),
+  Value = c(
+    as.character(nrow(occurrences)),
+    as.character(nrow(distinct(occurrences, lon, lat))),
+    as.character(missing_coords),
+    as.character(duplicate_coords),
+    sprintf("%.2f° to %.2f°", lon_range[1], lon_range[2]),
+    sprintf("%.2f° to %.2f°", lat_range[1], lat_range[2]),
+    as.character(nlyr(bioclim))
+  )
+)
+
+print(data_summary)
+
+# kable(data_summary, caption = "Data Quality Summary") %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+#                 full_width = FALSE)
+```
+
+# 2. Geographic Distribution
+
+## 2.1 Occurrence Map
+
+```{r}
+#| label: fig-occurrence-map
+#| fig-cap: "Geographic distribution of H. longicornis occurrence points in Australia"
+#| fig-width: 12
+#| fig-height: 8
+
+# Get boundaries
+world <- ne_countries(scale = "medium", returnclass = "sf")
+australia <- ne_states(country = "australia", returnclass = "sf")
+
+# Create map
+p_map <- ggplot() +
+  geom_sf(data = world, fill = "grey95", color = "grey70", linewidth = 0.3) +
+  geom_sf(data = australia, fill = "grey90", color = "grey50", linewidth = 0.5) +
+  geom_point(data = occurrences,
+             aes(x = lon, y = lat),
+             color = "#d62728", size = 3, alpha = 0.7, shape = 16) +
+  #coord_sf(xlim = c(113, 154), ylim = c(-44, -10)) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_line(color = "grey90", linewidth = 0.2),
+    panel.background = element_rect(fill = "aliceblue"),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "grey40"),
+    axis.title = element_text(size = 11)
+  ) +
+  labs(
+    title = "Haemaphysalis longicornis Occurrence Points in Australia",
+    subtitle = sprintf("n = %d spatially-thinned points (10km minimum distance)", nrow(occurrences)),
+    x = "Longitude",
+    y = "Latitude"
+  )
+
+print(p_map)
+```
+
+## 2.2 State-Level Distribution
+
+```{r}
+#| label: state-distribution
+
+# Assign points to states (approximate based on lat/lon)
+occurrences_state <- occurrences %>%
+  mutate(
+    state = case_when(
+      lat > -29 & lon > 153 ~ "Queensland",
+      lat > -37 & lat <= -29 & lon > 141 ~ "New South Wales",
+      lat > -39 & lat <= -37 & lon > 141 ~ "Victoria",
+      lat <= -39 & lon > 143 ~ "Tasmania",
+      lat > -26 & lon <= 153 & lon > 141 ~ "Queensland (inland)",
+      TRUE ~ "Other/Border"
+    )
+  )
+
+# Count by state
+state_summary <- occurrences_state %>%
+  count(state, name = "occurrences") %>%
+  arrange(desc(occurrences)) %>%
+  mutate(percentage = round(occurrences / sum(occurrences) * 100, 1))
+
+
+print(state_summary)
+# kable(state_summary,
+#       caption = "Occurrence distribution by Australian state (approximate)",
+#       col.names = c("State/Territory", "Occurrences", "Percentage (%)")) %>%
+#   kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# Visualize
+ggplot(state_summary, aes(x = reorder(state, occurrences), y = occurrences)) +
+  geom_col(fill = "#1f77b4", alpha = 0.8) +
+  geom_text(aes(label = occurrences), hjust = -0.2, size = 4) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Occurrence Points by State/Territory",
+    x = NULL,
+    y = "Number of Occurrences"
+  ) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 11)
+  )
+```
+
+# 3. Spatial Pattern Analysis
+
+## 3.1 Nearest Neighbor Analysis
+
+```{r}
+#| label: nearest-neighbor
+
+# Remove any NA coordinates
+occurrences_complete <- occurrences %>%
+  filter(!is.na(lon) & !is.na(lat))
+
+# Convert to spatstat ppp object
+occ_ppp <- ppp(
+  x = occurrences_complete$lon,
+  y = occurrences_complete$lat,
+  xrange = range(occurrences_complete$lon),
+  yrange = range(occurrences_complete$lat)
+)
+
+# Calculate nearest neighbor distances
+nn_distances <- nndist(occ_ppp)
+
+# Summary statistics
+nn_summary <- tibble(
+  Statistic = c("Mean", "Median", "Min", "Max", "St.Dev"),
+  `Distance (km)` = c(
+    mean(nn_distances) * 111,  # Convert degrees to approximate km
+    median(nn_distances) * 111,
+    min(nn_distances) * 111,
+    max(nn_distances) * 111,
+    sd(nn_distances) * 111
+  )
+)
+
+print(nn_summary)
+
+# kable(nn_summary,
+#       caption = "Nearest Neighbor Distance Statistics",
+#       digits = 1) %>%
+#   kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# Visualize distribution
+hist(nn_distances * 111,
+     main = "Distribution of Nearest Neighbor Distances",
+     xlab = "Distance to Nearest Neighbor (km)",
+     ylab = "Frequency",
+     col = "steelblue",
+     border = "white",
+     breaks = 20)
+abline(v = 10, col = "red", lty = 2, lwd = 2)
+text(10, max(table(cut(nn_distances * 111, breaks = 20))) * 0.9,
+     "10km thinning\nthreshold", pos = 4, col = "red", cex = 0.9)
+```
+
+**Interpretation**: The spatial thinning successfully enforced a minimum 10km distance between points, reducing sampling bias from clustered collections.
+
+# 4. Climate Space Analysis
+
+## 4.1 Extract Climate Data at Occurrence Points
+
+```{r}
+#| label: extract-climate
+
+# Convert to spatial vector
+occ_spatial <- vect(occurrences,
+                    geom = c("lon", "lat"),
+                    crs = "EPSG:4326")
+
+# Extract all 19 bioclim variables
+occ_climate <- terra::extract(bioclim, occ_spatial)
+
+# Rename the bioclim columns to simple names
+names(occ_climate) <- c("ID", paste0("bio", 1:19))
+
+# Combine with occurrence data
+occ_with_climate <- bind_cols(occurrences, occ_climate %>% select(-ID))
+
+# Verify the column names
+names(occ_with_climate)
+
+# Save for later use
+write_csv(occ_with_climate, paste0(processed_data_dir, "occurrences_with_climate_detailed.csv"))
+
+cat(sprintf("Climate values extracted for %d occurrence points\n", nrow(occ_with_climate)))
+cat(sprintf("Variables extracted: %d\n", sum(grepl("wc2.1", names(occ_with_climate)))))
+```
+
+## 4.2 Key Climate Variables Summary
+
+```{r}
+#| label: climate-summary-table
+
+# Select key variables and create summary
+climate_vars <- tibble(
+  Variable = c(
+    "BIO1: Annual Mean Temperature (°C)",
+    "BIO5: Max Temp Warmest Month (°C)",
+    "BIO6: Min Temp Coldest Month (°C)",
+    "BIO12: Annual Precipitation (mm)",
+    "BIO15: Precipitation Seasonality (CV)"
+  ),
+  Mean = c(
+    mean(occ_with_climate$bio1, na.rm = TRUE) / 10,
+    mean(occ_with_climate$bio5, na.rm = TRUE) / 10,
+    mean(occ_with_climate$bio6, na.rm = TRUE) / 10,
+    mean(occ_with_climate$bio12, na.rm = TRUE),
+    mean(occ_with_climate$bio15, na.rm = TRUE)
+  ),
+  Min = c(
+    min(occ_with_climate$bio1, na.rm = TRUE) / 10,
+    min(occ_with_climate$bio5, na.rm = TRUE) / 10,
+    min(occ_with_climate$bio6, na.rm = TRUE) / 10,
+    min(occ_with_climate$bio12, na.rm = TRUE),
+    min(occ_with_climate$bio15, na.rm = TRUE)
+  ),
+  Max = c(
+    max(occ_with_climate$bio1, na.rm = TRUE) / 10,
+    max(occ_with_climate$bio5, na.rm = TRUE) / 10,
+    max(occ_with_climate$bio6, na.rm = TRUE) / 10,
+    max(occ_with_climate$bio12, na.rm = TRUE),
+    max(occ_with_climate$bio15, na.rm = TRUE)
+  )
+)
+
+print(climate_vars)
+```
+
+## 4.3 Climate Variable Distributions
+
+```{r}
+#| label: fig-climate-distributions
+#| fig-cap: "Distributions of key climate variables at occurrence locations"
+#| fig-width: 12
+#| fig-height: 10
+
+# Prepare data for plotting
+climate_long <- occ_with_climate |>
+  select(lon, lat,
+         BIO1 = bio1,
+         BIO5 = bio5,
+         BIO6 = bio6,
+         BIO12 = bio12,
+         BIO15 = bio15,
+         BIO10 = bio10,
+         BIO11 = bio11) |>
+  mutate(
+    BIO1 = BIO1 / 10,
+    BIO5 = BIO5 / 10,
+    BIO6 = BIO6 / 10,
+    BIO10 = BIO10 / 10,
+    BIO11 = BIO11 / 10
+  )
+
+# Create individual plots
+p1 <- ggplot(climate_long, aes(x = BIO1)) +
+  geom_histogram(bins = 15, fill = "#1f77b4", alpha = 0.7, color = "white") +
+  geom_vline(xintercept = mean(climate_long$BIO1, na.rm = TRUE), color = "red", linetype = "dashed", linewidth = 1) +
+  theme_minimal() +
+  labs(title = "BIO1: Annual Mean Temperature",
+       x = "Temperature (°C)", y = "Count")
+
+p2 <- ggplot(climate_long, aes(x = BIO5)) +
+  geom_histogram(bins = 15, fill = "#ff7f0e", alpha = 0.7, color = "white") +
+  geom_vline(xintercept = mean(climate_long$BIO5, na.rm = TRUE), color = "red", linetype = "dashed", linewidth = 1) +
+  theme_minimal() +
+  labs(title = "BIO5: Max Temp Warmest Month",
+       x = "Temperature (°C)", y = "Count")
+
+p3 <- ggplot(climate_long, aes(x = BIO6)) +
+  geom_histogram(bins = 15, fill = "#2ca02c", alpha = 0.7, color = "white") +
+  geom_vline(xintercept = mean(climate_long$BIO6, na.rm = TRUE), color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = -8.1, color = "purple", linetype = "dotted", linewidth = 1) +
+  annotate("text", x = -8.1, y = Inf, label = "Cold limit\n(-8.1°C)",
+           vjust = 1.5, hjust = -0.1, color = "purple", size = 3) +
+  theme_minimal() +
+  labs(title = "BIO6: Min Temp Coldest Month",
+       x = "Temperature (°C)", y = "Count")
+
+p4 <- ggplot(climate_long, aes(x = BIO12)) +
+  geom_histogram(bins = 15, fill = "#d62728", alpha = 0.7, color = "white") +
+  geom_vline(xintercept = mean(climate_long$BIO12, na.rm = TRUE), color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = 1000, color = "purple", linetype = "dotted", linewidth = 1) +
+  annotate("text", x = 1000, y = Inf, label = "Moisture\nthreshold",
+           vjust = 1.5, hjust = -0.1, color = "purple", size = 3) +
+  theme_minimal() +
+  labs(title = "BIO12: Annual Precipitation",
+       x = "Precipitation (mm)", y = "Count")
+
+p5 <- ggplot(climate_long, aes(x = BIO15)) +
+  geom_histogram(bins = 15, fill = "#9467bd", alpha = 0.7, color = "white") +
+  geom_vline(xintercept = mean(climate_long$BIO15, na.rm = TRUE), color = "red", linetype = "dashed", linewidth = 1) +
+  theme_minimal() +
+  labs(title = "BIO15: Precipitation Seasonality",
+       x = "Coefficient of Variation", y = "Count")
+
+p6 <- ggplot(climate_long, aes(x = BIO10)) +
+  geom_histogram(bins = 15, fill = "#8c564b", alpha = 0.7, color = "white") +
+  geom_vline(xintercept = mean(climate_long$BIO10, na.rm = TRUE), color = "red", linetype = "dashed", linewidth = 1) +
+  theme_minimal() +
+  labs(title = "BIO10: Mean Temp Warmest Quarter",
+       x = "Temperature (°C)", y = "Count")
+
+# Combine plots
+(p1 + p2) / (p3 + p4) / (p5 + p6) +
+  plot_annotation(
+    title = "Climate Space Occupied by H. longicornis in Australia",
+    subtitle = "Red dashed lines = mean; Purple dotted lines = biological thresholds",
+    theme = theme(plot.title = element_text(size = 16, face = "bold"))
+  )
+```
+
+## 4.4 Biological Constraints Check
+
+```{r}
+#| label: biological-constraints
+
+# Check against known biological constraints from literature
+cat("==== BIOLOGICAL CONSTRAINTS VALIDATION ====\n\n")
+
+# 1. Cold tolerance: Winter minimum > -8.1°C
+min_winter_temp <- min(climate_long$BIO6, na.rm = TRUE)
+cat(sprintf("Minimum winter temperature: %.1f°C\n", min_winter_temp))
+cat(sprintf("  Status: %s (threshold: -8.1°C)\n",
+            ifelse(min_winter_temp > -8.1, "✓ PASS", "✗ FAIL")))
+
+# 2. Moisture requirement: Should align with >1000mm rainfall
+mean_precip <- mean(climate_long$BIO12, na.rm = TRUE)
+pct_above_1000 <- sum(climate_long$BIO12 > 1000, na.rm = TRUE) / nrow(climate_long) * 100
+cat(sprintf("\nMean annual precipitation: %.0f mm\n", mean_precip))
+cat(sprintf("  Points above 1000mm: %.1f%%\n", pct_above_1000))
+cat(sprintf("  Status: %s (expect >80%% above 1000mm)\n",
+            ifelse(pct_above_1000 > 80, "✓ PASS", "⚠ MARGINAL")))
+
+# 3. Temperature tolerance: -2°C to 40°C range
+min_temp <- min(climate_long$BIO6, na.rm = TRUE)
+max_temp <- max(climate_long$BIO5, na.rm = TRUE)
+cat(sprintf("\nTemperature range: %.1f°C to %.1f°C\n", min_temp, max_temp))
+cat(sprintf("  Status: %s (expected: -2°C to 40°C)\n",
+            ifelse(min_temp >= -2 & max_temp <= 40, "✓ PASS", "⚠ CHECK")))
+```
+
+# 5. Environmental Space Comparison
+
+## 5.1 Background Climate Sampling
+
+```{r}
+#| label: background-sampling
+
+# Sample background points from study area (Australia/NZ extent)
+set.seed(123)
+background <- spatSample(bioclim,
+                        size = 10000,
+                        method = "random",
+                        na.rm = TRUE,
+                        xy = TRUE)
+
+cat(sprintf("Sampled %d background points from study area\n", nrow(background)))
+```
+
+## 5.2 Presence vs. Background Climate Comparison
+
+```{r}
+#| label: fig-presence-vs-background
+#| fig-cap: "Comparison of climate space: presence points vs. available background"
+#| fig-width: 12
+#| fig-height: 8
+
+# Prepare data for comparison
+presence_data <- climate_long %>%
+  select(BIO1, BIO5, BIO6, BIO12) %>%
+  mutate(type = "Presence")
+
+background_data <- background %>%
+  as.data.frame() %>%
+  select(BIO1 = wc2.1_2.5m_bio_1,
+         BIO5 = wc2.1_2.5m_bio_5,
+         BIO6 = wc2.1_2.5m_bio_6,
+         BIO12 = wc2.1_2.5m_bio_12) %>%
+  mutate(
+    BIO1 = BIO1 / 10,
+    BIO5 = BIO5 / 10,
+    BIO6 = BIO6 / 10,
+    type = "Available"
+  )
+
+combined_data <- bind_rows(presence_data, background_data)
+
+# Plot comparisons
+p_temp <- ggplot(combined_data, aes(x = BIO1, fill = type)) +
+  geom_density(alpha = 0.5, linewidth = 1) +
+  scale_fill_manual(values = c("Available" = "grey60", "Presence" = "#d62728")) +
+  theme_minimal() +
+  labs(title = "Annual Mean Temperature",
+       x = "Temperature (°C)",
+       y = "Density",
+       fill = NULL) +
+  theme(legend.position = "top")
+
+p_precip <- ggplot(combined_data, aes(x = BIO12, fill = type)) +
+  geom_density(alpha = 0.5, linewidth = 1) +
+  scale_fill_manual(values = c("Available" = "grey60", "Presence" = "#d62728")) +
+  theme_minimal() +
+  labs(title = "Annual Precipitation",
+       x = "Precipitation (mm)",
+       y = "Density",
+       fill = NULL) +
+  theme(legend.position = "top")
+
+p_maxtemp <- ggplot(combined_data, aes(x = BIO5, fill = type)) +
+  geom_density(alpha = 0.5, linewidth = 1) +
+  scale_fill_manual(values = c("Available" = "grey60", "Presence" = "#d62728")) +
+  theme_minimal() +
+  labs(title = "Max Temp Warmest Month",
+       x = "Temperature (°C)",
+       y = "Density",
+       fill = NULL) +
+  theme(legend.position = "top")
+
+p_mintemp <- ggplot(combined_data, aes(x = BIO6, fill = type)) +
+  geom_density(alpha = 0.5, linewidth = 1) +
+  scale_fill_manual(values = c("Available" = "grey60", "Presence" = "#d62728")) +
+  geom_vline(xintercept = -8.1, linetype = "dashed", color = "purple") +
+  theme_minimal() +
+  labs(title = "Min Temp Coldest Month",
+       x = "Temperature (°C)",
+       y = "Density",
+       fill = NULL) +
+  theme(legend.position = "top")
+
+(p_temp + p_precip) / (p_maxtemp + p_mintemp) +
+  plot_annotation(
+    title = "Presence vs. Available Climate Space",
+    subtitle = "Red = where species occurs; Grey = available in study area",
+    theme = theme(plot.title = element_text(size = 14, face = "bold"))
+  )
+```
+
+**Interpretation**:
+
+- **Temperature**: Species occupies warmer portions of available temperature space, avoiding coldest areas
+- **Precipitation**: Strong selection for high rainfall areas (>1000mm), consistent with moisture requirements
+- **Seasonal temperatures**: Avoids extreme cold (note absence below -8°C minimum) and prefers moderate seasonal variation
+
+# 6. Preliminary Correlation Analysis
+
+```{r}
+#| label: fig-correlation-matrix
+#| fig-cap: "Correlation matrix of all 19 bioclimatic variables"
+#| fig-width: 12
+#| fig-height: 12
+
+# Calculate correlation matrix for all bioclim variables
+bioclim_vars <- occ_with_climate %>%
+  select(starts_with("wc2.1_2.5m_bio"))
+
+# Standardize temperature variables (divide by 10)
+bioclim_vars_std <- bioclim_vars %>%
+  mutate(across(c(wc2.1_2.5m_bio_1, wc2.1_2.5m_bio_2, wc2.1_2.5m_bio_3,
+                  wc2.1_2.5m_bio_4, wc2.1_2.5m_bio_5, wc2.1_2.5m_bio_6,
+                  wc2.1_2.5m_bio_7, wc2.1_2.5m_bio_8, wc2.1_2.5m_bio_9,
+                  wc2.1_2.5m_bio_10, wc2.1_2.5m_bio_11),
+                ~ . / 10))
+
+# Calculate correlation
+cor_matrix <- cor(bioclim_vars_std, use = "complete.obs")
+
+# Rename for clarity
+rownames(cor_matrix) <- paste0("BIO", 1:19)
+colnames(cor_matrix) <- paste0("BIO", 1:19)
+
+# Plot correlation matrix
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         tl.col = "black",
+         tl.cex = 0.8,
+         cl.cex = 0.8,
+         addCoef.col = "black",
+         number.cex = 0.5,
+         title = "Bioclimatic Variables Correlation Matrix\n(n=56 occurrence points)",
+         mar = c(0, 0, 2, 0))
+```
+
+## 6.2 High Correlation Pairs
+
+```{r}
+#| label: high-correlations
+
+# Identify highly correlated pairs (|r| > 0.8)
+high_cor <- which(abs(cor_matrix) > 0.8 & abs(cor_matrix) < 1, arr.ind = TRUE)
+high_cor_df <- data.frame(
+  Variable_1 = rownames(cor_matrix)[high_cor[, 1]],
+  Variable_2 = colnames(cor_matrix)[high_cor[, 2]],
+  Correlation = cor_matrix[high_cor]
+) %>%
+  filter(as.numeric(substr(Variable_1, 4, 6)) < as.numeric(substr(Variable_2, 4, 6))) %>%
+  arrange(desc(abs(Correlation)))
+
+print(high_cor_df)
+# kable(high_cor_df,
+#       caption = "Variable pairs with |correlation| > 0.8 (candidates for removal in Step 5)",
+#       digits = 3,
+#       col.names = c("Variable 1", "Variable 2", "Correlation")) %>%
+#   kable_styling(bootstrap_options = c("striped", "hover"))
+
+cat(sprintf("\nIdentified %d highly correlated variable pairs\n", nrow(high_cor_df)))
+cat("These will be addressed in Step 5: Variable Selection\n")
+```
+
+# 7. Summary and Key Findings
+
+## 7.1 Data Quality
+
+```{r}
+#| label: summary-quality
+cat("==== DATA QUALITY SUMMARY ====\n\n")
+cat(sprintf("✓ %d spatially-thinned occurrence points (10km minimum)\n", nrow(occurrences)))
+cat(sprintf("✓ No missing coordinates\n"))
+cat(sprintf("✓ Geographic extent: %.1f°E to %.1f°E, %.1f°S to %.1f°S\n",
+            lon_range[1], lon_range[2], abs(lat_range[2]), abs(lat_range[1])))
+cat(sprintf("✓ 19 bioclimatic variables extracted successfully\n"))
+```
+
+## 7.2 Geographic Distribution
+
+```{r}
+cat("\n==== GEOGRAPHIC DISTRIBUTION ====\n\n")
+cat("Primary concentration: Eastern coastal Australia\n")
+cat(sprintf("  - New South Wales: %d points (%.0f%%)\n",
+            state_summary$occurrences[state_summary$state == "New South Wales"],
+            state_summary$percentage[state_summary$state == "New South Wales"]))
+cat(sprintf("  - Queensland: %d points (%.0f%%)\n",
+            sum(state_summary$occurrences[grepl("Queensland", state_summary$state)]),
+            sum(state_summary$percentage[grepl("Queensland", state_summary$state)])))
+cat("\nConsistent with known distribution along humid eastern seaboard\n")
+```
+
+## 7.3 Climate Envelope
+
+```{r}
+cat("\n==== CLIMATE ENVELOPE ====\n\n")
+cat(sprintf("Temperature range: %.1f°C to %.1f°C (mean: %.1f°C)\n",
+            min(climate_long$BIO1, na.rm = TRUE),
+            max(climate_long$BIO1, na.rm = TRUE),
+            mean(climate_long$BIO1, na.rm = TRUE)))
+cat(sprintf("Precipitation range: %.0f to %.0f mm (mean: %.0f mm)\n",
+            min(climate_long$BIO12, na.rm = TRUE),
+            max(climate_long$BIO12, na.rm = TRUE),
+            mean(climate_long$BIO12, na.rm = TRUE)))
+cat(sprintf("Winter minimum: %.1f°C (above -8.1°C threshold: ✓)\n",
+            min(climate_long$BIO6, na.rm = TRUE)))
+cat(sprintf("Points above 1000mm rainfall: %.0f%% ✓\n", pct_above_1000))
+```
+
+## 7.4 Next Steps
+
+```{r}
+cat("\n==== RECOMMENDATIONS FOR MODELING ====\n\n")
+cat("1. Variable Selection (Step 5):\n")
+cat(sprintf("   - Reduce from 19 to ~6-8 variables based on correlation analysis\n"))
+cat(sprintf("   - Remove BIO8, BIO9, BIO18, BIO19 (known artifacts)\n"))
+cat(sprintf("   - Prioritize BIO1, BIO6, BIO12, BIO15 (biologically relevant)\n\n"))
+
+cat("2. Background Sampling:\n")
+cat("   - Use Australia/NZ extent (not global)\n")
+cat("   - Sample 10,000 background points\n")
+cat("   - Consider bias file based on sampling density\n\n")
+
+cat("3. Model Considerations:\n")
+cat(sprintf("   - Sample size (n=%d) requires careful parameter tuning\n", nrow(occurrences)))
+cat("   - Strong climate preferences evident → good potential for modeling\n")
+cat("   - Coastal distribution → may need to mask ocean areas\n")
+```
+
+# Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

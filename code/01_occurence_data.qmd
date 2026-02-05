@@ -1,0 +1,211 @@
+---
+title: "Get H. longicornis occurrence data"
+author: "Alexander W. Gofton"
+date: today
+date-format: "D MMMM YYYY"
+format:
+  html:
+    page-layout: full
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    code-tools: true
+    embed-resources: true
+    theme:
+      light: cosmo
+      dark: darkly
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+
+## Phase 1: Foundation & Data Collection
+### Step 1: Gather Occurrence Data
+
+**Goal:** Get a dataset of where H. longicornis has been found in Australia
+**Why:** SDMs need real locations where the species exists. Think of it like teaching a computer "this tick lives in places that look like this"
+**What you'll do:** Download occurrence records from GBIF (Global Biodiversity Information Facility), filter for Australia only, clean up duplicates and dodgy coordinates
+
+```{r setup}
+library(tidyverse)
+```
+
+
+## Getting and wrangling occurence data
+
+```{r ala_data}
+data_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/data/"
+
+ala_records <- read.csv(paste0(data_dir, "ALA_occurence/records-2026-02-04.csv")) %>%
+    select(dataResourceName, basisOfRecord, recordedBy, occurrenceStatus,
+            year, month, day, stateProvince, locality, decimalLatitude,
+            decimalLongitude, geodeticDatum, catalogNumber) %>%
+    filter(
+        dataResourceName != "Western Australian Museum provider for OZCAM"
+        )
+
+# Sort by data completeness before removing duplicates
+ala_records <- ala_records %>%
+  arrange(!is.na(year), !is.na(month), !is.na(day), desc(year)) %>%
+  distinct(decimalLatitude, decimalLongitude, .keep_all = TRUE)
+
+ala_records <- ala_records%>%
+    select(
+        ID = catalogNumber,
+        year,
+        month,
+        day,
+        lat = decimalLatitude,
+        lon = decimalLongitude
+    ) %>%
+    mutate(ID = as.character(ID)) %>%
+    filter(ID != "J9160")
+
+glimpse(ala_records)
+```
+
+```{r gbif_data}
+gbif_records <- read.csv(paste0(data_dir, "gbif_data_0012653-260129131611470.csv"), sep = "\t") %>%
+    select(gbifID, year, month, day, decimalLatitude, decimalLongitude)
+
+# Sort by data completeness before removing duplicates
+gbif_records <- gbif_records %>%
+  arrange(!is.na(year), !is.na(month), !is.na(day), desc(year)) %>%
+  distinct(decimalLatitude, decimalLongitude, .keep_all = TRUE)
+
+gbif_records <- gbif_records %>%
+    select(
+        ID = gbifID,
+        year,
+        month,
+        day,
+        lat = decimalLatitude,
+        lon = decimalLongitude
+    ) %>%
+    mutate(ID = as.character(ID)) %>%
+    filter(
+        ID != "2249229809",
+        ID != "5196344805",
+        ID != "1632554489"
+        )
+
+glimpse(gbif_records)
+```
+
+```{r Rochlin_et_al_2018_data}
+rochlin_records <- read.csv(paste0(data_dir, "Rochlin_et_al_2018_tjy210_suppl_supplemental_table-s2.csv")) %>%
+  rename(
+    lat = latitude,
+    lon = longitude
+  ) %>%
+  mutate(ID = as.character(ID))
+
+glimpse(rochlin_records)
+```
+
+```{r Zhang_et_al_2019_data}
+zhang_records <- read.csv(paste0(data_dir, "Zhang_et_al_2019_ms_dataset_v1.csv")) %>%
+  filter(tick_sp == "Haemaphysalis longicornis") %>%
+  select(ID, lon, lat) %>%
+  mutate(ID = as.character(ID))
+
+glimpse(zhang_records)
+```
+
+```{r remove_duplicates}
+# Combine datasets and remove coordinate duplicates
+final_records <- bind_rows(ala_records, gbif_records, zhang_records, rochlin_records) %>%
+    filter(!is.na(lat), !is.na(lon)) %>%
+  arrange(!is.na(year), !is.na(month), !is.na(day), desc(year)) %>%
+  distinct(lat, lon, .keep_all = TRUE)
+
+# Check the results
+cat("ALA records:", nrow(ala_records), "\n")
+cat("GBIF records:", nrow(gbif_records), "\n")
+cat("Rochlin records:", nrow(rochlin_records), "\n")
+cat("Zhang records:", nrow(zhang_records), "\n")
+cat("Combined total:", nrow(bind_rows(ala_records, gbif_records)), "\n")
+cat("After removing coordinate duplicates:", nrow(final_records), "\n")
+cat("Duplicates removed:", nrow(bind_rows(ala_records, gbif_records)) - nrow(final_records), "\n")
+```
+
+```{r mapping}
+library(leaflet)
+
+leaflet(final_records) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~lon,
+    lat = ~lat,
+    radius = 6,
+    color = "#2C3E50",
+    fillColor = "#E74C3C",
+    fillOpacity = 0.7,
+    weight = 2,
+    popup = ~paste(
+      "<strong>ID:</strong>", ID, "<br>",
+      "<strong>Date:</strong>", paste(day, month, year, sep = "/"), "<br>",
+      "<strong>Coordinates:</strong>", round(lat, 4), ",", round(lon, 4), "<br>"
+    )
+  ) %>%
+  addScaleBar(position = "bottomleft") %>%
+  addMiniMap(toggleDisplay = TRUE, position = "bottomright")
+```
+
+## Spatial filtering
+Thins the data points to avoid biases of over-samples regions
+
+```{r}
+library(spThin)
+
+# Thin your occurrence data to 10km minimum distance
+# Add a species column
+final_records_with_species <- final_records %>%
+  mutate(species = "H_longicornis")
+
+# Thin the data
+thinned_records <- thin(
+  loc.data = final_records_with_species,
+  lat.col = "lat",
+  long.col = "lon",
+  spec.col = "species",
+  thin.par = 10,
+  reps = 10,
+  write.files = TRUE,
+  out.dir = "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/processed_data/",
+  write.log.file = FALSE
+)
+```
+
+
+```{r mapping_thinned_records}
+thinned <- read.csv("~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/processed_data/thinned_data_thin1.csv")
+
+leaflet(thinned) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~lon,
+    lat = ~lat,
+    radius = 6,
+    color = "#2C3E50",
+    fillColor = "#E74C3C",
+    fillOpacity = 0.7,
+    weight = 2,
+    popup = ~paste(
+      "<strong>ID:</strong>", species, "<br>",
+      "<strong>Coordinates:</strong>", round(lat, 4), ",", round(lon, 4), "<br>"
+    )
+  ) %>%
+  addScaleBar(position = "bottomleft") %>%
+  addMiniMap(toggleDisplay = TRUE, position = "bottomright")
+
+```
+
+# Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

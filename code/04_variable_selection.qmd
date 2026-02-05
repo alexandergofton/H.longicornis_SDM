@@ -1,0 +1,651 @@
+---
+title: "Step 4: Variable Selection & Correlation Analysis"
+author: "Alexander W. Gofton"
+date: today
+date-format: "D MMMM YYYY"
+format:
+  html:
+    page-layout: full
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    code-tools: true
+    embed-resources: true
+    theme:
+      light: cosmo
+      dark: darkly
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+
+# Overview
+
+This step performs systematic variable selection to identify a reduced set of bioclimatic variables for species distribution modeling. The goal is to select 6-8 uncorrelated variables that are biologically relevant for *Haemaphysalis longicornis* while avoiding multicollinearity issues in the MaxEnt model.
+
+## Objectives
+
+1. Exclude variables with known spatial artifacts (BIO8, 9, 18, 19)
+2. Calculate correlation matrix for remaining variables
+3. Identify and remove highly correlated variable pairs (r > 0.8)
+4. Select final variable set based on biological importance
+5. Validate selected variables capture key environmental constraints
+6. Prepare reduced climate rasters for modeling
+
+## Rationale
+
+**Why variable selection matters:**
+- **Multicollinearity**: Highly correlated variables confuse MaxEnt, leading to unreliable coefficient estimates
+- **Overfitting**: Too many variables increase model complexity unnecessarily
+- **Interpretation**: Fewer variables make the model easier to interpret and communicate
+- **Biological relevance**: Focus on variables that actually limit species distribution
+
+**Literature guidance:**
+- Remove BIO8, 9, 18, 19 (spatial artifacts in WorldClim)
+- Prioritize temperature and moisture variables for *H. longicornis*
+- Target: 6-8 variables (balance between complexity and performance)
+
+```{r}
+#| label: setup
+
+library(terra)
+library(tidyverse)
+library(corrplot)
+library(caret)  # For findCorrelation
+library(knitr)
+library(ggcorrplot)
+library(viridis)
+```
+
+```{r}
+#| label: set-paths
+
+# Set data directory
+processed_data_dir <- "/Users/gof005/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/processed_data/"
+```
+
+# 1. Load Data
+
+```{r}
+#| label: load-data
+
+# Load occurrence data with climate values from Step 3
+occ_climate <- read_csv(paste0(processed_data_dir, "occurrences_with_climate_detailed.csv"))
+
+cat("==== DATA LOADED ====\n")
+cat(sprintf("Occurrence points: %d\n", nrow(occ_climate)))
+cat(sprintf("Total variables: %d\n", ncol(occ_climate)))
+
+# Display column names to verify structure
+cat("\nColumn names:\n")
+print(names(occ_climate))
+
+# Load full climate rasters
+bioclim <- rast(paste0(processed_data_dir, "bioclim.tif"))
+cat(sprintf("\nClimate rasters loaded: %d layers\n", nlyr(bioclim)))
+```
+
+# 2. Exclude Problematic Variables
+
+Based on literature (Escobar et al. 2014, Mod et al. 2016), BIO8, BIO9, BIO18, and BIO19 contain known spatial artifacts in WorldClim and should be excluded.
+
+```{r}
+#| label: exclude-artifacts
+
+cat("==== EXCLUDING PROBLEMATIC VARIABLES ====\n\n")
+
+# Define problematic variables
+problematic_vars <- c("bio8", "bio9", "bio18", "bio19")
+
+cat("Excluding variables with known spatial artifacts:\n")
+cat("  - BIO8: Mean Temperature of Wettest Quarter\n")
+cat("  - BIO9: Mean Temperature of Driest Quarter\n")
+cat("  - BIO18: Precipitation of Warmest Quarter\n")
+cat("  - BIO19: Precipitation of Coldest Quarter\n\n")
+
+# Get all bioclim variable names (bio1-bio19)
+all_bio_vars <- paste0("bio", 1:19)
+
+# Keep only non-problematic variables
+candidate_vars <- setdiff(all_bio_vars, problematic_vars)
+
+cat(sprintf("Starting variables: %d\n", length(all_bio_vars)))
+cat(sprintf("After exclusion: %d\n", length(candidate_vars)))
+cat(sprintf("\nCandidate variables: %s\n", paste(candidate_vars, collapse = ", ")))
+
+# Extract candidate variables from occurrence data
+occ_candidate <- occ_climate %>%
+  select(species, lon, lat, all_of(candidate_vars))
+
+cat(sprintf("\nOccurrence data subset: %d points × %d variables\n",
+            nrow(occ_candidate), length(candidate_vars)))
+```
+
+# 3. Correlation Analysis
+
+## 3.1 Calculate Correlation Matrix
+
+```{r}
+#| label: correlation-matrix
+
+cat("\n==== CORRELATION ANALYSIS ====\n\n")
+
+# Extract just the climate variables
+climate_vars <- occ_candidate %>%
+  select(all_of(candidate_vars))
+
+# Standardize temperature variables (divide by 10 for actual °C)
+# This ensures temperature and precipitation variables are on comparable scales
+climate_vars_std <- climate_vars %>%
+  mutate(across(c(bio1, bio2, bio3, bio4, bio5, bio6, bio7, bio10, bio11),
+                ~ . / 10))
+
+# Calculate Pearson correlation matrix
+cor_matrix <- cor(climate_vars_std, use = "complete.obs")
+
+cat("Correlation matrix calculated\n")
+cat(sprintf("Dimensions: %d × %d\n", nrow(cor_matrix), ncol(cor_matrix)))
+
+# Summary of correlation values
+cor_values <- cor_matrix[upper.tri(cor_matrix)]
+cat(sprintf("\nCorrelation summary:\n"))
+cat(sprintf("  Mean |r|: %.3f\n", mean(abs(cor_values))))
+cat(sprintf("  Max |r|: %.3f\n", max(abs(cor_values))))
+cat(sprintf("  Min |r|: %.3f\n", min(abs(cor_values))))
+```
+
+## 3.2 Visualize Correlation Matrix
+
+```{r}
+#| label: fig-correlation-full
+#| fig-cap: "Correlation matrix of 15 candidate bioclimatic variables"
+#| fig-width: 10
+#| fig-height: 6
+
+# Create correlation plot with corrplot
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         order = "hclust",  # Hierarchical clustering
+         tl.col = "black",
+         tl.srt = 45,
+         tl.cex = 1,
+         cl.cex = 0.9,
+         addCoef.col = "black",
+         number.cex = 0.6,
+         col = colorRampPalette(c("#2166AC", "#FFFFFF", "#B2182B"))(200),
+         title = "Bioclimatic Variables Correlation Matrix (15 variables)",
+         mar = c(0, 0, 2, 0))
+
+# Add legend box for high correlation threshold
+rect.hclust <- function() {
+  abline(h = 0.8, col = "red", lty = 2, lwd = 2)
+}
+```
+
+## 3.3 Identify High Correlation Pairs
+
+```{r}
+#| label: high-correlations
+
+# Find pairs with |r| > 0.8
+high_cor <- which(abs(cor_matrix) > 0.8 & abs(cor_matrix) < 1, arr.ind = TRUE)
+
+# Create data frame of high correlation pairs
+high_cor_df <- data.frame(
+  Variable_1 = rownames(cor_matrix)[high_cor[, 1]],
+  Variable_2 = colnames(cor_matrix)[high_cor[, 2]],
+  Correlation = cor_matrix[high_cor]
+) %>%
+  # Remove duplicate pairs (keep only upper triangle)
+  filter(as.numeric(gsub("bio", "", Variable_1)) <
+         as.numeric(gsub("bio", "", Variable_2))) %>%
+  arrange(desc(abs(Correlation)))
+
+cat("\n==== HIGH CORRELATION PAIRS (|r| > 0.8) ====\n\n")
+cat(sprintf("Number of highly correlated pairs: %d\n\n", nrow(high_cor_df)))
+
+if (nrow(high_cor_df) > 0) {
+  print(high_cor_df, row.names = FALSE)
+
+  cat("\n--- Variables involved in high correlations ---\n")
+  vars_in_pairs <- unique(c(high_cor_df$Variable_1, high_cor_df$Variable_2))
+  cat(paste(vars_in_pairs, collapse = ", "), "\n")
+} else {
+  cat("No variable pairs with |r| > 0.8 found.\n")
+}
+```
+
+# 4. Variable Selection Strategy
+
+## 4.1 Define Biological Priorities
+
+Based on literature review of *H. longicornis* biology:
+
+```{r}
+#| label: biological-priorities
+
+cat("\n==== BIOLOGICAL PRIORITY VARIABLES ====\n\n")
+
+# Define variable importance based on H. longicornis biology
+priority_vars <- list(
+  "High Priority" = c(
+    "bio1"  = "Annual Mean Temperature - Core thermal niche",
+    "bio6"  = "Min Temp Coldest Month - Cold tolerance limit (-8.1°C)",
+    "bio12" = "Annual Precipitation - Moisture requirement (>1000mm)"
+  ),
+  "Medium Priority" = c(
+    "bio5"  = "Max Temp Warmest Month - Heat tolerance (peak at 35°C)",
+    "bio15" = "Precipitation Seasonality - Drought stress indicator"
+  ),
+  "Lower Priority" = c(
+    "bio2"  = "Mean Diurnal Range - Daily temperature variation",
+    "bio3"  = "Isothermality - Temperature evenness",
+    "bio4"  = "Temperature Seasonality - Annual variation",
+    "bio7"  = "Temperature Annual Range - Extreme variation",
+    "bio10" = "Mean Temp Warmest Quarter - Summer conditions",
+    "bio11" = "Mean Temp Coldest Quarter - Winter conditions",
+    "bio13" = "Precipitation Wettest Month - Maximum moisture",
+    "bio14" = "Precipitation Driest Month - Minimum moisture",
+    "bio16" = "Precipitation Wettest Quarter - Seasonal moisture",
+    "bio17" = "Precipitation Driest Quarter - Seasonal drought"
+  )
+)
+
+# Print priority structure
+for (priority_level in names(priority_vars)) {
+  cat(sprintf("\n%s:\n", priority_level))
+  for (i in seq_along(priority_vars[[priority_level]])) {
+    var_name <- names(priority_vars[[priority_level]])[i]
+    var_desc <- priority_vars[[priority_level]][i]
+    cat(sprintf("  %s: %s\n", toupper(var_name), var_desc))
+  }
+}
+```
+
+## 4.2 Systematic Variable Reduction
+
+Use a combination of automated correlation-based selection and biological priorities:
+
+```{r}
+#| label: variable-reduction
+
+cat("\n==== SYSTEMATIC VARIABLE REDUCTION ====\n\n")
+
+# Method 1: Use caret's findCorrelation (automated)
+# This identifies variables to remove based on correlation threshold
+highly_cor_vars <- findCorrelation(cor_matrix, cutoff = 0.8, names = TRUE)
+
+cat("Method 1: Automated correlation filtering (caret::findCorrelation)\n")
+cat(sprintf("Variables flagged for removal: %d\n", length(highly_cor_vars)))
+if (length(highly_cor_vars) > 0) {
+  cat(paste(highly_cor_vars, collapse = ", "), "\n")
+}
+
+# Method 2: Manual selection based on biological priorities
+# Keep high priority vars, remove correlated lower priority vars
+
+cat("\n\nMethod 2: Biology-informed selection\n")
+cat("Strategy:\n")
+cat("  1. Always keep high priority variables (bio1, bio6, bio12)\n")
+cat("  2. From correlated pairs, keep the more biologically relevant one\n")
+cat("  3. Target 6-8 final variables\n\n")
+
+# Start with high priority variables (always keep)
+selected_vars <- c("bio1", "bio6", "bio12")
+
+cat("Starting selection:\n")
+cat(sprintf("  Core variables: %s\n", paste(selected_vars, collapse = ", ")))
+
+# Add medium priority if not highly correlated with selected
+medium_priority <- c("bio5", "bio15")
+for (var in medium_priority) {
+  # Check correlation with already selected variables
+  max_cor <- max(abs(cor_matrix[var, selected_vars]))
+  if (max_cor < 0.8) {
+    selected_vars <- c(selected_vars, var)
+    cat(sprintf("  + Added %s (max correlation with selected: %.2f)\n", var, max_cor))
+  } else {
+    cat(sprintf("  - Excluded %s (too correlated: %.2f)\n", var, max_cor))
+  }
+}
+
+# Add additional variables if we have < 6
+if (length(selected_vars) < 8) {
+  cat("\nNeed more variables to reach target (8)...\n")
+
+  # Candidates from lower priority
+  candidates <- c("bio3", "bio4", "bio7", "bio13", "bio14", "bio16", "bio17")
+
+  for (var in candidates) {
+    if (length(selected_vars) >= 8) break  # Stop at 8
+
+    # Check if variable is in our dataset and not too correlated
+    if (var %in% candidate_vars) {
+      max_cor <- max(abs(cor_matrix[var, selected_vars]))
+      if (max_cor < 0.8) {
+        selected_vars <- c(selected_vars, var)
+        cat(sprintf("  + Added %s (max correlation: %.2f)\n", var, max_cor))
+
+        if (length(selected_vars) >= 8) {
+          cat(sprintf("\n  Reached target: %d variables\n", length(selected_vars)))
+          break
+        }
+      }
+    }
+  }
+}
+
+cat(sprintf("\n=== FINAL SELECTION: %d variables ===\n", length(selected_vars)))
+cat(paste(selected_vars, collapse = ", "), "\n")
+```
+
+## 4.3 Validate Final Selection
+
+```{r}
+selected_vars <- c("bio1", "bio6", "bio5", "bio12", "bio15", "bio3")
+```
+
+```{r}
+#| label: validate-selection
+
+cat("\n==== VALIDATION OF FINAL SELECTION ====\n\n")
+
+# Check 1: No high correlations remain
+final_cor_matrix <- cor_matrix[selected_vars, selected_vars]
+max_cor <- max(abs(final_cor_matrix[upper.tri(final_cor_matrix)]))
+
+cat("Check 1: Maximum correlation among selected variables\n")
+cat(sprintf("  Max |r|: %.3f (threshold: 0.8) %s\n",
+            max_cor,
+            ifelse(max_cor < 0.8, "✓ PASS", "✗ FAIL")))
+
+# Check 2: Key biological constraints covered
+has_temp <- any(selected_vars %in% c("bio1", "bio5", "bio10"))
+has_cold <- any(selected_vars %in% c("bio6", "bio11"))
+has_precip <- any(selected_vars %in% c("bio12", "bio13", "bio14"))
+has_seasonality <- any(selected_vars %in% c("bio4", "bio15"))
+
+cat("\nCheck 2: Biological constraint coverage\n")
+cat(sprintf("  Temperature variable: %s\n", ifelse(has_temp, "✓ Yes", "✗ No")))
+cat(sprintf("  Cold tolerance variable: %s\n", ifelse(has_cold, "✓ Yes", "✗ No")))
+cat(sprintf("  Precipitation variable: %s\n", ifelse(has_precip, "✓ Yes", "✗ No")))
+cat(sprintf("  Seasonality variable: %s\n", ifelse(has_seasonality, "✓ Yes", "✗ No")))
+
+# Check 3: Target range (6-8 variables)
+in_range <- length(selected_vars) >= 6 & length(selected_vars) <= 8
+
+cat("\nCheck 3: Number of variables\n")
+cat(sprintf("  Count: %d (target: 6-8) %s\n",
+            length(selected_vars),
+            ifelse(in_range, "✓ PASS", "⚠ CHECK")))
+
+# Overall validation
+all_checks <- (max_cor < 0.8) & has_temp & has_cold & has_precip
+cat(sprintf("\n%s Overall Validation: %s\n",
+            ifelse(all_checks, "✓", "✗"),
+            ifelse(all_checks, "PASSED", "NEEDS REVIEW")))
+```
+
+# 5. Visualize Final Selection
+
+## 5.1 Correlation Matrix of Selected Variables
+
+```{r}
+#| label: fig-correlation-final
+#| fig-cap: "Correlation matrix of final selected variables"
+#| fig-width: 10
+#| fig-height: 6
+
+# Plot correlation matrix for selected variables only
+ggcorrplot(final_cor_matrix,
+           type = "upper",
+           lab = TRUE,
+           lab_size = 4,
+           colors = c("#2166AC", "#FFFFFF", "#B2182B"),
+           title = sprintf("Final Variable Selection (%d variables)", length(selected_vars)),
+           ggtheme = theme_minimal()) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12)
+  )
+```
+
+## 5.2 Variable Descriptions
+
+```{r}
+#| label: variable-descriptions
+
+# Create description table for final variables
+var_descriptions <- tibble(
+  Variable = selected_vars,
+  Code = toupper(selected_vars),
+  Description = c(
+    "Annual Mean Temperature",
+    "Min Temperature of Coldest Month",
+    "Annual Precipitation",
+    "Max Temperature of Warmest Month",
+    "Precipitation Seasonality (Coefficient of Variation)",
+    "Isothermality (BIO2/BIO7 × 100)",
+    "Temperature Seasonality (standard deviation × 100)",
+    "Temperature Annual Range (BIO5-BIO6)"
+  )[match(selected_vars, c("bio1", "bio6", "bio12", "bio5", "bio15", "bio3", "bio4", "bio7"))],
+  Units = c(
+    "°C × 10",
+    "°C × 10",
+    "mm",
+    "°C × 10",
+    "CV",
+    "%",
+    "°C × 100",
+    "°C × 10"
+  )[match(selected_vars, c("bio1", "bio6", "bio12", "bio5", "bio15", "bio3", "bio4", "bio7"))],
+  Relevance = c(
+    "Core thermal niche",
+    "Cold tolerance limit",
+    "Moisture requirement",
+    "Heat tolerance",
+    "Drought stress",
+    "Temperature evenness",
+    "Seasonal variation",
+    "Extreme variation"
+  )[match(selected_vars, c("bio1", "bio6", "bio12", "bio5", "bio15", "bio3", "bio4", "bio7"))]
+)
+
+cat("\n==== FINAL VARIABLE SET ====\n\n")
+print(var_descriptions)
+```
+
+## 5.3 Climate Space of Selected Variables
+
+```{r}
+#| label: fig-climate-space-selected
+#| fig-cap: "Climate space distributions for selected variables"
+#| fig-width: 10
+#| fig-height: 6
+
+# Extract selected variables from occurrence data
+selected_climate <- occ_climate %>%
+  select(lon, lat, all_of(selected_vars))
+
+# Standardize temperature variables for plotting
+selected_climate_plot <- selected_climate %>%
+  mutate(across(c(any_of(c("bio1", "bio2", "bio3", "bio4", "bio5", "bio6", "bio7", "bio10", "bio11"))),
+                ~ . / 10))
+
+# Create histogram for each selected variable
+plot_list <- list()
+
+for (var in selected_vars) {
+  # Get variable description
+  var_info <- var_descriptions %>% filter(Variable == var)
+
+  p <- ggplot(selected_climate_plot, aes(x = .data[[var]])) +
+    geom_histogram(bins = 15, fill = "#1f77b4", alpha = 0.7, color = "white") +
+    geom_vline(xintercept = mean(selected_climate_plot[[var]], na.rm = TRUE),
+               color = "red", linetype = "dashed", linewidth = 1) +
+    theme_minimal() +
+    labs(
+      title = var_info$Description,
+      x = paste0(var_info$Description, " (", var_info$Units, ")"),
+      y = "Frequency"
+    ) +
+    theme(
+      plot.title = element_text(face = "bold", size = 11),
+      axis.title = element_text(size = 10)
+    )
+
+  # Add biological threshold lines if applicable
+  if (var == "bio6") {
+    p <- p + geom_vline(xintercept = -8.1, color = "purple",
+                       linetype = "dotted", linewidth = 1) +
+      annotate("text", x = -8.1, y = Inf, label = "Cold limit",
+               vjust = 1.5, hjust = -0.1, color = "purple", size = 3)
+  }
+
+  if (var == "bio12") {
+    p <- p + geom_vline(xintercept = 1000, color = "purple",
+                       linetype = "dotted", linewidth = 1) +
+      annotate("text", x = 1000, y = Inf, label = "Moisture threshold",
+               vjust = 1.5, hjust = -0.1, color = "purple", size = 3)
+  }
+
+  plot_list[[var]] <- p
+}
+
+# Arrange plots
+library(patchwork)
+wrap_plots(plot_list, ncol = 2) +
+  plot_annotation(
+    title = "Climate Space for Selected Variables",
+    subtitle = sprintf("n = %d occurrence points", nrow(selected_climate)),
+    theme = theme(plot.title = element_text(size = 16, face = "bold"))
+  )
+```
+
+# 6. Prepare Reduced Climate Rasters
+
+Extract only the selected variables from the full climate stack:
+
+```{r}
+#| label: prepare-rasters
+
+cat("\n==== PREPARING REDUCED CLIMATE RASTERS ====\n\n")
+
+# Get variable indices (bio1 = layer 1, bio2 = layer 2, etc.)
+var_indices <- as.numeric(gsub("bio", "", selected_vars))
+
+# Extract selected layers from full climate stack
+bioclim_selected <- subset(bioclim, var_indices)
+
+# Rename layers to simple names
+names(bioclim_selected) <- selected_vars
+
+cat(sprintf("Extracted %d layers from %d total\n", nlyr(bioclim_selected), nlyr(bioclim)))
+cat(sprintf("Selected layers: %s\n", paste(names(bioclim_selected), collapse = ", ")))
+
+# Verify
+cat(sprintf("\nReduced climate stack:\n"))
+print(bioclim_selected)
+```
+
+# 7. Save Outputs
+
+```{r}
+#| label: save-outputs
+
+cat("\n==== SAVING OUTPUTS ====\n\n")
+
+# 1. Save selected variable list
+selected_vars_info <- tibble(
+  variable = selected_vars,
+  index = var_indices,
+  description = var_descriptions$Description,
+  relevance = var_descriptions$Relevance
+)
+
+write_csv(selected_vars_info,
+          paste0(processed_data_dir, "selected_variables_list.csv"))
+cat("✓ Saved: selected_variables_list.csv\n")
+
+# 2. Save correlation matrix
+write_csv(as.data.frame(final_cor_matrix) %>% rownames_to_column("variable"),
+          paste0(processed_data_dir, "selected_variables_correlation.csv"))
+cat("✓ Saved: selected_variables_correlation.csv\n")
+
+# 3. Save reduced climate rasters
+writeRaster(bioclim_selected,
+            filename = paste0(processed_data_dir, "bioclim_selected.tif"),
+            overwrite = TRUE)
+cat("✓ Saved: bioclim_selected.tif\n")
+
+saveRDS(bioclim_selected,
+        paste0(processed_data_dir, "bioclim_selected.rds"))
+cat("✓ Saved: bioclim_selected.rds\n")
+
+# 4. Save occurrence data with selected variables only
+occ_selected <- occ_climate %>%
+  select(species, lon, lat, all_of(selected_vars))
+
+write_csv(occ_selected,
+          paste0(processed_data_dir, "occurrences_selected_vars.csv"))
+cat("✓ Saved: occurrences_selected_vars.csv\n")
+
+saveRDS(occ_selected,
+        paste0(processed_data_dir, "occurrences_selected_vars.rds"))
+cat("✓ Saved: occurrences_selected_vars.rds\n")
+
+cat("\nAll outputs saved successfully!\n")
+```
+
+# 8. Summary
+
+```{r}
+#| label: final-summary
+
+cat("\n==== VARIABLE SELECTION SUMMARY ====\n\n")
+
+cat("Starting point:\n")
+cat(sprintf("  - 19 total bioclimatic variables\n"))
+cat(sprintf("  - Excluded 4 problematic variables (BIO8, 9, 18, 19)\n"))
+cat(sprintf("  - 15 candidate variables\n\n"))
+
+cat("Selection process:\n")
+cat(sprintf("  - Correlation threshold: |r| < 0.8\n"))
+cat(sprintf("  - Biological priority weighting applied\n"))
+cat(sprintf("  - Target range: 6-8 variables\n\n"))
+
+cat("Final selection:\n")
+cat(sprintf("  - %d variables selected: %s\n",
+            length(selected_vars),
+            paste(toupper(selected_vars), collapse = ", ")))
+cat(sprintf("  - Maximum correlation: %.3f\n", max_cor))
+cat(sprintf("  - All biological constraints covered: %s\n",
+            ifelse(all_checks, "✓ Yes", "✗ No")))
+
+cat("\nKey biological variables included:\n")
+for (i in 1:min(5, nrow(var_descriptions))) {
+  cat(sprintf("  - %s: %s (%s)\n",
+              var_descriptions$Code[i],
+              var_descriptions$Description[i],
+              var_descriptions$Relevance[i]))
+}
+
+cat("\nOutputs for Step 5 (MaxEnt modeling):\n")
+cat("  ✓ bioclim_selected.tif/rds - reduced climate stack\n")
+cat("  ✓ occurrences_selected_vars.csv/rds - occurrence data\n")
+cat("  ✓ selected_variables_list.csv - variable metadata\n")
+
+cat("\n=== READY FOR STEP 5: BASELINE MAXENT MODEL ===\n")
+```
+
+# Session Information
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```

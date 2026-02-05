@@ -1,0 +1,9 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+data/
+literature/
+outputs/
+processed_data/
+spatial_thin_log.txt
