@@ -1,0 +1,526 @@
+---
+title: "Step 5: Baseline MaxEnt Model"
+author: "Alexander W. Gofton"
+date: today
+date-format: "D MMMM YYYY"
+format:
+  html:
+    page-layout: full
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    code-tools: true
+    embed-resources: true
+    theme:
+      light: cosmo
+      dark: darkly
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+
+## Overview
+
+This script builds a baseline MaxEnt species distribution model for *Haemaphysalis longicornis* using:
+
+- **56 global occurrence points** (Australia, Asia, NZ, USA)
+- **6 selected climate variables** (bio1, bio6, bio5, bio12, bio15, bio3)
+- **Default MaxEnt settings** as a baseline for later optimization
+
+The model is trained on global data to capture the full climate niche and reduce extrapolation risk when projecting to future climates.
+
+## Setup
+
+```{r setup}
+library(tidyverse)
+library(terra)
+library(dismo)
+library(rJava)  # Required for MaxEnt backend
+library(beepr)
+
+# Define directories
+processed_data_dir <-
+  "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/processed_data/"
+figures_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/figures/"
+```
+
+## Load Data
+
+```{r load_data}
+# Load selected climate variables (global extent)
+bioclim_selected <- readRDS(paste0(processed_data_dir, "bioclim_selected.rds"))
+
+# Load occurrence data with selected variables
+occurrences <- readRDS(paste0(processed_data_dir, "occurrences_selected_vars.rds"))
+
+# Check data
+cat("Climate layers loaded:", nlyr(bioclim_selected), "\n")
+cat("Layer names:", names(bioclim_selected), "\n\n")
+cat("Occurrence points:", nrow(occurrences), "\n")
+cat("Columns:", paste(names(occurrences), collapse = ", "), "\n")
+
+# View first few records
+head(occurrences)
+```
+
+## Prepare Presence Data
+
+```{r prepare_presence}
+# Extract coordinates as data frame
+presence_coords <- occurrences |>
+  dplyr::select(lon, lat) |>
+  as.data.frame()
+
+cat("Presence coordinates prepared:", nrow(presence_coords), "points\n")
+cat("Longitude range:", round(min(presence_coords$lon, na.rm = TRUE), 2), "to",
+    round(max(presence_coords$lon, na.rm = TRUE), 2), "\n")
+cat("Latitude range:", round(min(presence_coords$lat, na.rm = TRUE), 2), "to",
+    round(max(presence_coords$lat, na.rm = TRUE), 2), "\n")
+
+# Quick visualization
+plot(bioclim_selected[[1]], main = "Occurrence Points on BIO1 (Annual Mean Temperature)")
+points(presence_coords, pch = 16, col = "red", cex = 0.8)
+```
+
+## Generate Background Points
+
+MaxEnt requires background (pseudo-absence) points representing available environmental conditions. We'll sample 10,000 random points from the accessible range.
+
+```{r background_points}
+# Set seed for reproducibility
+set.seed(7990)
+
+# Sample background points from non-NA cells in climate rasters
+# Using 10,000 points (standard for presence-only models)
+background_coords <- spatSample(
+  bioclim_selected,
+  size = 10000,
+  method = "random",
+  na.rm = TRUE,
+  xy = TRUE,
+  values = FALSE
+) %>%
+  as.data.frame() %>%
+  dplyr::select(x, y) %>%
+  rename(lon = x, lat = y)
+
+beep(sound = 3)
+```
+
+```{r}
+cat("Background points generated:", nrow(background_coords), "\n")
+cat("Longitude range:", round(min(background_coords$lon), 2), "to",
+    round(max(background_coords$lon), 2), "\n")
+cat("Latitude range:", round(min(background_coords$lat), 2), "to",
+    round(max(background_coords$lat), 2), "\n")
+```
+
+```{r}
+# Visualize presence and background points
+plot(bioclim_selected[[1]], main = "Presence (red) and Background (gray) Points")
+points(background_coords, pch = ".", col = "gray50", cex = 2)
+points(presence_coords, pch = 16, col = "red", cex = 0.8)
+legend("bottomleft",
+       legend = c("Presence", "Background"),
+       pch = c(16, 46),
+       col = c("red", "gray50"),
+       pt.cex = c(0.8, 2))
+
+# Save background points for reproducibility
+write.csv(background_coords,
+          paste0(processed_data_dir, "background_points.csv"),
+          row.names = FALSE)
+```
+
+## Extract Climate Values
+
+```{r extract_climate}
+# Extract climate values at presence points
+presence_climate <- extract(bioclim_selected, presence_coords)
+
+# Extract climate values at background points
+background_climate <- extract(bioclim_selected, background_coords)
+
+# Check for and remove any NA values
+presence_complete <- complete.cases(presence_climate)
+background_complete <- complete.cases(background_climate)
+
+cat("Presence points with complete data:", sum(presence_complete), "/", nrow(presence_climate), "\n")
+cat("Background points with complete data:", sum(background_complete), "/", nrow(background_climate), "\n")
+
+# Filter to complete cases
+if (!all(presence_complete)) {
+  cat("\nWarning: Removing", sum(!presence_complete), "presence points with missing climate data\n")
+  presence_coords <- presence_coords[presence_complete, ]
+  presence_climate <- presence_climate[presence_complete, ]
+}
+
+if (!all(background_complete)) {
+  cat("Removing", sum(!background_complete), "background points with missing climate data\n")
+  background_coords <- background_coords[background_complete, ]
+  background_climate <- background_climate[background_complete, ]
+}
+
+# Remove ID column from extracted data
+presence_climate <- presence_climate %>% dplyr::select(-ID)
+background_climate <- background_climate %>% dplyr::select(-ID)
+
+cat("\nFinal sample sizes:\n")
+cat("Presence:", nrow(presence_climate), "\n")
+cat("Background:", nrow(background_climate), "\n")
+```
+
+## Train-Test Split
+
+We'll use 80% of data for training and 20% for testing to evaluate model performance.
+
+```{r train_test_split}
+# Set seed for reproducibility
+set.seed(123)
+
+# Create training/testing indices for presence data
+train_indices <- sample(1:nrow(presence_coords),
+                        size = round(0.8 * nrow(presence_coords)))
+
+# Split presence data
+train_presence <- presence_coords[train_indices, ]
+test_presence <- presence_coords[-train_indices, ]
+
+cat("Training presence points:", nrow(train_presence), "\n")
+cat("Testing presence points:", nrow(test_presence), "\n")
+cat("Training proportion:", round(nrow(train_presence) / nrow(presence_coords), 2), "\n")
+```
+
+## Build Baseline MaxEnt Model
+
+Training MaxEnt with default settings:
+- Features: linear, quadratic, product, threshold, hinge (auto-selected based on sample size)
+- Regularization multiplier: β = 1 (default)
+- Convergence threshold: 10^-5
+- Maximum iterations: 500
+
+```{r maxent_model}
+cat("Training MaxEnt model...\n")
+cat("This may take a few minutes with global data...\n\n")
+
+# Train MaxEnt model
+# dismo::maxent() automatically handles background points
+maxent_model <- maxent(
+  x = bioclim_selected,           # Climate rasters
+  p = train_presence,              # Presence points (training only)
+  args = c(
+    'betamultiplier=1',            # Default regularization
+    'linear=true',
+    'quadratic=true',
+    'product=true',
+    'threshold=true',
+    'hinge=true',
+    'threads=4',                   # Use 4 CPU threads for faster processing
+    'responsecurves=true',         # Generate response curves
+    'jackknife=true'               # Perform jackknife analysis
+  )
+)
+
+cat("\nMaxEnt model training complete!\n")
+
+# View model summary
+print(maxent_model)
+```
+
+## Model Evaluation - AUC
+
+```{r evaluate_auc}
+# Evaluate on training data
+train_eval <- evaluate(
+  p = train_presence,
+  a = background_coords,  # Use all background points
+  model = maxent_model,
+  x = bioclim_selected
+)
+
+# Evaluate on test data
+test_eval <- evaluate(
+  p = test_presence,
+  a = background_coords,
+  model = maxent_model,
+  x = bioclim_selected
+)
+
+cat("=== Model Performance ===\n\n")
+cat("Training AUC:", round(train_eval@auc, 3), "\n")
+cat("Testing AUC:", round(test_eval@auc, 3), "\n")
+cat("AUC difference (train - test):", round(train_eval@auc - test_eval@auc, 3), "\n")
+
+# Interpretation
+if (test_eval@auc >= 0.9) {
+  cat("\nInterpretation: Excellent model discrimination\n")
+} else if (test_eval@auc >= 0.8) {
+  cat("\nInterpretation: Good model discrimination\n")
+} else if (test_eval@auc >= 0.7) {
+  cat("\nInterpretation: Acceptable model discrimination\n")
+} else {
+  cat("\nInterpretation: Poor model discrimination - investigate issues\n")
+}
+
+# Check for overfitting
+if ((train_eval@auc - test_eval@auc) > 0.1) {
+  cat("\nWarning: Possible overfitting detected (AUC difference > 0.1)\n")
+  cat("Consider simplifying model in optimization step\n")
+} else {
+  cat("\nNo severe overfitting detected (AUC difference < 0.1)\n")
+}
+```
+
+## Variable Importance
+
+```{r variable_importance}
+# Extract variable contribution
+var_importance <- as.data.frame(maxent_model@results) %>%
+  rownames_to_column("metric") %>%
+  rename(value = 2) %>%
+  filter(grepl("contribution|permutation.importance", metric))
+
+# Separate contribution and permutation importance
+contributions <- var_importance %>%
+  filter(grepl("contribution", metric)) %>%
+  mutate(
+    variable = str_remove(metric, ".contribution"),
+    type = "Percent Contribution"
+  ) %>%
+  dplyr::select(variable, value, type)
+
+permutation <- var_importance %>%
+  filter(grepl("permutation", metric)) %>%
+  mutate(
+    variable = str_remove(metric, ".permutation.importance"),
+    type = "Permutation Importance"
+  ) %>%
+  dplyr::select(variable, value, type)
+
+# Combine
+all_importance <- bind_rows(contributions, permutation)
+
+# Print table
+cat("\n=== Variable Importance ===\n\n")
+print(all_importance %>% pivot_wider(names_from = type, values_from = value), n = 20)
+
+# Plot variable contribution
+ggplot(contributions, aes(x = reorder(variable, value), y = value)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Variable Contribution to MaxEnt Model",
+    subtitle = "Baseline model with default settings",
+    x = "Climate Variable",
+    y = "Percent Contribution (%)"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(paste0(figures_dir, "05_variable_contribution.png"),
+       width = 8, height = 5, dpi = 300)
+
+# Plot permutation importance
+ggplot(permutation, aes(x = reorder(variable, value), y = value)) +
+  geom_col(fill = "coral") +
+  coord_flip() +
+  labs(
+    title = "Variable Permutation Importance",
+    subtitle = "Decrease in AUC when variable is permuted",
+    x = "Climate Variable",
+    y = "Permutation Importance"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(paste0(figures_dir, "05_permutation_importance.png"),
+       width = 8, height = 5, dpi = 300)
+```
+
+## Generate Predictions - Global Extent
+
+```{r predict_global}
+cat("Generating global habitat suitability predictions...\n")
+
+# Predict to global extent
+prediction_global <- predict(
+  maxent_model,
+  bioclim_selected,
+  args = c('outputformat=logistic')  # Suitability 0-1 scale
+)
+
+# Check prediction
+cat("\nGlobal prediction raster:\n")
+print(prediction_global)
+cat("Value range:", round(minmax(prediction_global)[1], 3), "to",
+    round(minmax(prediction_global)[2], 3), "\n")
+
+# Save global prediction
+writeRaster(
+  prediction_global,
+  paste0(processed_data_dir, "maxent_baseline_prediction_global.tif"),
+  overwrite = TRUE
+)
+
+# Plot global prediction
+plot(prediction_global,
+     main = "Baseline MaxEnt Prediction - Global Extent",
+     col = hcl.colors(100, "YlOrRd", rev = TRUE))
+points(presence_coords, pch = 16, col = "blue", cex = 0.5)
+```
+
+## Generate Predictions - Australia/NZ Focus
+
+For detailed Australian projections, we'll crop to Australia/NZ extent.
+
+```{r predict_australia}
+# Define Australia/NZ extent
+# Longitude: 110°E to 180°E
+# Latitude: -48°S to -10°S
+aus_nz_extent <- ext(110, 180, -48, -10)
+
+# Crop climate data to Australia/NZ
+bioclim_aus <- crop(bioclim_selected, aus_nz_extent)
+
+# Predict to Australia/NZ
+prediction_aus <- predict(
+  maxent_model,
+  bioclim_aus,
+  args = c('outputformat=logistic')
+)
+
+cat("Australia/NZ prediction raster:\n")
+print(prediction_aus)
+
+# Save Australia/NZ prediction
+writeRaster(
+  prediction_aus,
+  paste0(processed_data_dir, "maxent_baseline_prediction_aus.tif"),
+  overwrite = TRUE
+)
+
+# Plot Australia/NZ prediction
+plot(prediction_aus,
+     main = "Baseline MaxEnt Prediction - Australia & New Zealand",
+     col = hcl.colors(100, "YlOrRd", rev = TRUE))
+
+# Add occurrence points within this region
+aus_occurrences <- occurrences %>%
+  filter(lon >= 110, lon <= 180, lat >= -48, lat <= -10)
+
+points(aus_occurrences$lon, aus_occurrences$lat,
+       pch = 16, col = "blue", cex = 1)
+```
+
+## Response Curves
+
+MaxEnt generates response curves showing how predicted suitability changes with each variable.
+
+```{r response_curves}
+# Response curves are automatically generated and stored in the model object
+# Plot them using the built-in function
+response(maxent_model)
+
+# These plots are automatically saved by MaxEnt in the working directory
+# We can also create custom response curve plots if needed
+
+cat("\nResponse curves generated.\n")
+cat("These show how habitat suitability changes along environmental gradients.\n")
+```
+
+## Jackknife Analysis
+
+Jackknife tests show the importance of each variable by:
+1. Training with only that variable
+2. Training without that variable
+
+```{r jackknife}
+# Jackknife results are in the model object
+# Plot using MaxEnt's built-in visualization
+
+# Note: This creates a plot showing:
+# - Dark blue bars: Model gain with only that variable
+# - Light blue bars: Model gain without that variable
+# - Red bar: Model gain with all variables
+
+# The jackknife plot is automatically created during model training
+# It shows which variables contain the most unique information
+
+cat("Jackknife analysis completed during model training.\n")
+cat("Check MaxEnt output for jackknife plots.\n")
+```
+
+## Save Model and Results
+
+```{r save_outputs}
+# Save the trained model object
+saveRDS(maxent_model, paste0(processed_data_dir, "maxent_baseline_model.rds"))
+
+# Save evaluation metrics
+evaluation_results <- data.frame(
+  metric = c("Training AUC", "Testing AUC", "AUC Difference", "Sample Size (Training)",
+             "Sample Size (Testing)", "Background Points"),
+  value = c(
+    round(train_eval@auc, 3),
+    round(test_eval@auc, 3),
+    round(train_eval@auc - test_eval@auc, 3),
+    nrow(train_presence),
+    nrow(test_presence),
+    nrow(background_coords)
+  )
+)
+
+write.csv(evaluation_results,
+          paste0(processed_data_dir, "maxent_baseline_evaluation.csv"),
+          row.names = FALSE)
+
+# Save variable importance
+write.csv(all_importance,
+          paste0(processed_data_dir, "maxent_baseline_variable_importance.csv"),
+          row.names = FALSE)
+
+cat("\n=== Outputs Saved ===\n\n")
+cat("Model object:", paste0(processed_data_dir, "maxent_baseline_model.rds"), "\n")
+cat("Global prediction:", paste0(processed_data_dir, "maxent_baseline_prediction_global.tif"), "\n")
+cat("Australia prediction:", paste0(processed_data_dir, "maxent_baseline_prediction_aus.tif"), "\n")
+cat("Evaluation metrics:", paste0(processed_data_dir, "maxent_baseline_evaluation.csv"), "\n")
+cat("Variable importance:", paste0(processed_data_dir, "maxent_baseline_variable_importance.csv"), "\n")
+cat("Background points:", paste0(processed_data_dir, "background_points.csv"), "\n")
+```
+
+## Summary and Next Steps
+
+```{r summary}
+cat("\n=== STEP 5 COMPLETE ===\n\n")
+cat("Baseline MaxEnt Model Summary:\n")
+cat("- Training points:", nrow(train_presence), "\n")
+cat("- Testing points:", nrow(test_presence), "\n")
+cat("- Background points:", nrow(background_coords), "\n")
+cat("- Climate variables:", nlyr(bioclim_selected), "\n")
+cat("- Training AUC:", round(train_eval@auc, 3), "\n")
+cat("- Testing AUC:", round(test_eval@auc, 3), "\n\n")
+
+cat("Key Findings:\n")
+cat("1. Variable importance shows which climate factors drive distribution\n")
+cat("2. Response curves reveal species-environment relationships\n")
+cat("3. Global predictions validate model performance across regions\n")
+cat("4. Australia/NZ predictions provide baseline for future comparisons\n\n")
+
+cat("Next Steps:\n")
+cat("- Step 6: Detailed model evaluation and diagnostics\n")
+cat("- Step 7: Parameter optimization with ENMeval (test 30 model configurations)\n")
+cat("- Step 8: Final model validation with spatial cross-validation\n\n")
+
+cat("Quality Checks to Review:\n")
+cat("✓ Is testing AUC > 0.7? (Acceptable discrimination)\n")
+cat("✓ Is AUC difference < 0.1? (No severe overfitting)\n")
+cat("✓ Do predictions show high suitability in eastern Australia?\n")
+cat("✓ Do predictions show low suitability in arid interior?\n")
+cat("✓ Are most important variables biologically sensible?\n")
+```
+
+## Session Information
+
+```{r session_info}
+sessionInfo()
+```
