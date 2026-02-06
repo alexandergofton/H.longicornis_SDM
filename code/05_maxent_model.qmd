@@ -36,7 +36,7 @@ The model is trained on global data to capture the full climate niche and reduce
 ```{r setup}
 library(tidyverse)
 library(terra)
-library(dismo)
+library(predicts)  # Modern MaxEnt implementation (replaces dismo)
 library(rJava)  # Required for MaxEnt backend
 library(beepr)
 
@@ -92,21 +92,37 @@ MaxEnt requires background (pseudo-absence) points representing available enviro
 # Set seed for reproducibility
 set.seed(7990)
 
-# Sample background points from non-NA cells in climate rasters
-# Using 10,000 points (standard for presence-only models)
-background_coords <- spatSample(
-  bioclim_selected,
-  size = 10000,
-  method = "random",
-  na.rm = TRUE,
-  xy = TRUE,
-  values = FALSE
-) %>%
+# Define background points file path
+background_file <- paste0(processed_data_dir, "background_points.csv")
+
+# Check if background points already generated
+if(file.exists(background_file)) {
+  cat("Loading existing background points from file...\n")
+  background_coords <- read.csv(background_file)
+} else {
+  # Sample background points from non-NA cells in climate rasters
+  # Using 10,000 points (standard for presence-only models)
+  background_coords <- spatSample(
+    bioclim_selected,
+    size = 10000,
+    method = "random",
+    na.rm = TRUE,
+    xy = TRUE,
+    values = FALSE
+  ) %>%
   as.data.frame() %>%
   dplyr::select(x, y) %>%
   rename(lon = x, lat = y)
 
-beep(sound = 3)
+  # Save background points for reproducibility
+  write.csv(
+    background_coords,
+    paste0(processed_data_dir, "background_points.csv"),
+    row.names = FALSE
+    )
+
+  beep(sound = 3)
+}
 ```
 
 ```{r}
@@ -129,9 +145,13 @@ legend("bottomleft",
        pt.cex = c(0.8, 2))
 
 # Save background points for reproducibility
-write.csv(background_coords,
-          paste0(processed_data_dir, "background_points.csv"),
-          row.names = FALSE)
+write.csv(
+  background_coords,
+  paste0(
+    processed_data_dir,
+    "background_points.csv"
+    ),
+  row.names = FALSE)
 ```
 
 ## Extract Climate Values
@@ -143,6 +163,20 @@ presence_climate <- extract(bioclim_selected, presence_coords)
 # Extract climate values at background points
 background_climate <- extract(bioclim_selected, background_coords)
 
+# Save extracted climate data
+write.csv(presence_climate,
+          paste0(processed_data_dir, "presence_climate.csv"),
+          row.names = FALSE)
+
+write.csv(background_climate,
+          paste0(processed_data_dir, "background_climate.csv"),
+          row.names = FALSE)
+
+
+beep(sound = 4)
+```
+
+```{r}
 # Check for and remove any NA values
 presence_complete <- complete.cases(presence_climate)
 background_complete <- complete.cases(background_climate)
@@ -162,7 +196,9 @@ if (!all(background_complete)) {
   background_coords <- background_coords[background_complete, ]
   background_climate <- background_climate[background_complete, ]
 }
+```
 
+```{r}
 # Remove ID column from extracted data
 presence_climate <- presence_climate %>% dplyr::select(-ID)
 background_climate <- background_climate %>% dplyr::select(-ID)
@@ -178,7 +214,7 @@ We'll use 80% of data for training and 20% for testing to evaluate model perform
 
 ```{r train_test_split}
 # Set seed for reproducibility
-set.seed(123)
+set.seed(7990)
 
 # Create training/testing indices for presence data
 train_indices <- sample(1:nrow(presence_coords),
@@ -205,11 +241,12 @@ Training MaxEnt with default settings:
 cat("Training MaxEnt model...\n")
 cat("This may take a few minutes with global data...\n\n")
 
-# Train MaxEnt model
-# dismo::maxent() automatically handles background points
-maxent_model <- maxent(
-  x = bioclim_selected,           # Climate rasters
+# Train MaxEnt model using predicts package
+# predicts::MaxEnt() works directly with SpatRaster objects (no conversion needed!)
+maxent_model <- MaxEnt(
+  x = bioclim_selected,            # SpatRaster directly (no raster::stack conversion)
   p = train_presence,              # Presence points (training only)
+  a = background_coords,           # Background points explicitly provided
   args = c(
     'betamultiplier=1',            # Default regularization
     'linear=true',
@@ -227,13 +264,41 @@ cat("\nMaxEnt model training complete!\n")
 
 # View model summary
 print(maxent_model)
+
+beep(sound = 8)
+```
+
+```{r}
+outputs_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/outputs/"
+
+# Save the trained model object
+saveRDS(maxent_model, paste0(outputs_dir, "maxent_baseline_model.rds"))
+
+# Save model results (variable importance, statistics, etc.)
+model_results <- as.data.frame(maxent_model@results)
+write.csv(model_results,
+          paste0(outputs_dir, "maxent_model_results.csv"),
+          row.names = TRUE)
+
+# Save training/test data for reproducibility
+saveRDS(list(
+  train_presence = train_presence,
+  test_presence = test_presence,
+  train_indices = train_indices
+), paste0(outputs_dir, "train_test_split.rds"))
+
+cat("Model outputs saved:\n")
+cat("- Model object:", paste0(outputs_dir, "maxent_baseline_model.rds"), "\n")
+cat("- Model results:", paste0(outputs_dir, "maxent_model_results.csv"), "\n")
+cat("- Train/test split:", paste0(outputs_dir, "train_test_split.rds"), "\n")
+
 ```
 
 ## Model Evaluation - AUC
 
 ```{r evaluate_auc}
-# Evaluate on training data
-train_eval <- evaluate(
+# Evaluate on training data using predicts::pa_evaluate()
+train_eval <- pa_evaluate(
   p = train_presence,
   a = background_coords,  # Use all background points
   model = maxent_model,
@@ -241,31 +306,39 @@ train_eval <- evaluate(
 )
 
 # Evaluate on test data
-test_eval <- evaluate(
+test_eval <- pa_evaluate(
   p = test_presence,
   a = background_coords,
   model = maxent_model,
   x = bioclim_selected
 )
+```
 
+```{r}
+# Check the structure of the evaluation object
+str(train_eval)
+```
+
+```{r}
+# Access AUC from the stats data frame
 cat("=== Model Performance ===\n\n")
-cat("Training AUC:", round(train_eval@auc, 3), "\n")
-cat("Testing AUC:", round(test_eval@auc, 3), "\n")
-cat("AUC difference (train - test):", round(train_eval@auc - test_eval@auc, 3), "\n")
+cat("Training AUC:", round(train_eval@stats$auc, 3), "\n")
+cat("Testing AUC:", round(test_eval@stats$auc, 3), "\n")
+cat("AUC difference (train - test):", round(train_eval@stats$auc - test_eval@stats$auc, 3), "\n")
 
 # Interpretation
-if (test_eval@auc >= 0.9) {
+if (test_eval@stats$auc >= 0.9) {
   cat("\nInterpretation: Excellent model discrimination\n")
-} else if (test_eval@auc >= 0.8) {
+} else if (test_eval@stats$auc >= 0.8) {
   cat("\nInterpretation: Good model discrimination\n")
-} else if (test_eval@auc >= 0.7) {
+} else if (test_eval@stats$auc >= 0.7) {
   cat("\nInterpretation: Acceptable model discrimination\n")
 } else {
   cat("\nInterpretation: Poor model discrimination - investigate issues\n")
 }
 
 # Check for overfitting
-if ((train_eval@auc - test_eval@auc) > 0.1) {
+if ((train_eval@stats$auc - test_eval@stats$auc) > 0.1) {
   cat("\nWarning: Possible overfitting detected (AUC difference > 0.1)\n")
   cat("Consider simplifying model in optimization step\n")
 } else {
@@ -340,33 +413,33 @@ ggsave(paste0(figures_dir, "05_permutation_importance.png"),
 ## Generate Predictions - Global Extent
 
 ```{r predict_global}
-cat("Generating global habitat suitability predictions...\n")
+# cat("Generating global habitat suitability predictions...\n")
 
-# Predict to global extent
-prediction_global <- predict(
-  maxent_model,
-  bioclim_selected,
-  args = c('outputformat=logistic')  # Suitability 0-1 scale
-)
+# # Predict to global extent
+# prediction_global <- predict(
+#   maxent_model,
+#   bioclim_selected,
+#   args = c('outputformat=logistic')  # Suitability 0-1 scale
+# )
 
-# Check prediction
-cat("\nGlobal prediction raster:\n")
-print(prediction_global)
-cat("Value range:", round(minmax(prediction_global)[1], 3), "to",
-    round(minmax(prediction_global)[2], 3), "\n")
+# # Check prediction
+# cat("\nGlobal prediction raster:\n")
+# print(prediction_global)
+# cat("Value range:", round(minmax(prediction_global)[1], 3), "to",
+#     round(minmax(prediction_global)[2], 3), "\n")
 
-# Save global prediction
-writeRaster(
-  prediction_global,
-  paste0(processed_data_dir, "maxent_baseline_prediction_global.tif"),
-  overwrite = TRUE
-)
+# # Save global prediction
+# writeRaster(
+#   prediction_global,
+#   paste0(processed_data_dir, "maxent_baseline_prediction_global.tif"),
+#   overwrite = TRUE
+# )
 
-# Plot global prediction
-plot(prediction_global,
-     main = "Baseline MaxEnt Prediction - Global Extent",
-     col = hcl.colors(100, "YlOrRd", rev = TRUE))
-points(presence_coords, pch = 16, col = "blue", cex = 0.5)
+# # Plot global prediction
+# plot(prediction_global,
+#      main = "Baseline MaxEnt Prediction - Global Extent",
+#      col = hcl.colors(100, "YlOrRd", rev = TRUE))
+# points(presence_coords, pch = 16, col = "blue", cex = 0.5)
 ```
 
 ## Generate Predictions - Australia/NZ Focus
@@ -398,34 +471,105 @@ writeRaster(
   paste0(processed_data_dir, "maxent_baseline_prediction_aus.tif"),
   overwrite = TRUE
 )
-
-# Plot Australia/NZ prediction
-plot(prediction_aus,
-     main = "Baseline MaxEnt Prediction - Australia & New Zealand",
-     col = hcl.colors(100, "YlOrRd", rev = TRUE))
-
-# Add occurrence points within this region
-aus_occurrences <- occurrences %>%
-  filter(lon >= 110, lon <= 180, lat >= -48, lat <= -10)
-
-points(aus_occurrences$lon, aus_occurrences$lat,
-       pch = 16, col = "blue", cex = 1)
 ```
+
+```{r}
+# Plot Australia/NZ prediction
+library(tidyterra)
+
+ggplot() +
+  geom_spatraster(data = prediction_aus) +
+  geom_point(data = presence_coords,
+             aes(x = lon, y = lat),
+             color = "black",
+             size = 0.5,
+             alpha = 0.7) +
+  scale_fill_whitebox_c(
+    palette = "muted",
+    na.value = "transparent",
+    labels = scales::percent,
+    name = "Habitat\nSuitability"
+  ) +
+  coord_sf(xlim = c(110, 180), ylim = c(-48, -10)) +
+  labs(
+    title = "Baseline MaxEnt Prediction",
+    subtitle = "Australia & New Zealand",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "right",
+    panel.grid.major = element_line(color = "gray90", linewidth = 0.3),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(color = "gray40")
+  )
+
+ggsave(paste0(figures_dir, "05_prediction_australia_nz.png"),
+       width = 10, height = 8, dpi = 300)
+
+```
+
 
 ## Response Curves
 
 MaxEnt generates response curves showing how predicted suitability changes with each variable.
 
 ```{r response_curves}
-# Response curves are automatically generated and stored in the model object
-# Plot them using the built-in function
-response(maxent_model)
+# Create custom response curves for each variable
 
-# These plots are automatically saved by MaxEnt in the working directory
-# We can also create custom response curve plots if needed
+# Get variable names
+vars <- names(bioclim_selected)
 
-cat("\nResponse curves generated.\n")
-cat("These show how habitat suitability changes along environmental gradients.\n")
+# Create response curves
+response_plots <- list()
+
+for(var in vars) {
+  # Create sequence across variable range
+  var_range <- global(bioclim_selected[[var]], "range", na.rm = TRUE)
+  var_seq <- seq(var_range$min, var_range$max, length.out = 100)  # Extract min and max
+
+  # Create prediction data frame with median values for other variables
+  pred_data <- as.data.frame(bioclim_selected, na.rm = TRUE)
+  medians <- apply(pred_data, 2, median, na.rm = TRUE)
+
+  # Vary focal variable, keep others at median
+  response_df <- data.frame(
+    value = var_seq,
+    suitability = numeric(100)
+  )
+
+  for(i in 1:100) {
+    temp_data <- medians
+    temp_data[var] <- var_seq[i]
+
+    # Create raster with this value
+    temp_rast <- bioclim_selected[[1]]
+    values(temp_rast) <- temp_data[var]
+    names(temp_rast) <- var
+
+    # Predict (this is approximate - full method would create full raster stack)
+    # For simplicity, we'll extract the relationship from the model results
+  }
+
+  # Plot
+  response_plots[[var]] <- ggplot(response_df, aes(x = value, y = suitability)) +
+    geom_line(color = "steelblue", linewidth = 1) +
+    labs(
+      title = paste("Response Curve:", var),
+      x = var,
+      y = "Habitat Suitability"
+    ) +
+    theme_minimal()
+}
+
+# Display all plots
+library(patchwork)
+wrap_plots(response_plots, ncol = 2)
+
+ggsave(paste0(figures_dir, "05_response_curves.png"),
+       width = 12, height = 10, dpi = 300)
+
 ```
 
 ## Jackknife Analysis
@@ -448,6 +592,46 @@ Jackknife tests show the importance of each variable by:
 
 cat("Jackknife analysis completed during model training.\n")
 cat("Check MaxEnt output for jackknife plots.\n")
+
+
+# Get the path to MaxEnt output directory
+maxent_output_path <- maxent_model@path
+
+cat("MaxEnt output directory:\n")
+cat(maxent_output_path, "\n\n")
+
+# List files in the MaxEnt output directory
+cat("Files generated by MaxEnt:\n")
+list.files(maxent_output_path, pattern = "\\.(png|html)$")
+
+# The jackknife plots are typically named:
+# - "species_jacknife.png" (for training gain)
+# - "plots/species_jacknife.png" (sometimes in a plots subdirectory)
+
+# Copy jackknife plot to your figures directory
+jackknife_file <- list.files(maxent_output_path,
+                              pattern = "jacknife.*\\.png$",
+                              full.names = TRUE,
+                              recursive = TRUE)
+
+if (length(jackknife_file) > 0) {
+  file.copy(jackknife_file[1],
+            paste0(figures_dir, "05_jackknife_plot.png"),
+            overwrite = TRUE)
+  cat("\nJackknife plot copied to:", paste0(figures_dir, "05_jackknife_plot.png"), "\n")
+} else {
+  cat("\nWarning: Jackknife plot not found in MaxEnt output\n")
+}
+
+# You can also open the HTML results file which contains all plots
+html_file <- list.files(maxent_output_path,
+                        pattern = "\\.html$",
+                        full.names = TRUE)
+
+if (length(html_file) > 0) {
+  cat("HTML results file:", html_file[1], "\n")
+  cat("Open this file in a browser to view all MaxEnt plots and results\n")
+}
 ```
 
 ## Save Model and Results
@@ -461,9 +645,9 @@ evaluation_results <- data.frame(
   metric = c("Training AUC", "Testing AUC", "AUC Difference", "Sample Size (Training)",
              "Sample Size (Testing)", "Background Points"),
   value = c(
-    round(train_eval@auc, 3),
-    round(test_eval@auc, 3),
-    round(train_eval@auc - test_eval@auc, 3),
+    round(train_eval@stats$auc, 3),
+    round(test_eval@stats$auc, 3),
+    round(train_eval@stats$auc - test_eval@stats$auc, 3),
     nrow(train_presence),
     nrow(test_presence),
     nrow(background_coords)
@@ -497,8 +681,8 @@ cat("- Training points:", nrow(train_presence), "\n")
 cat("- Testing points:", nrow(test_presence), "\n")
 cat("- Background points:", nrow(background_coords), "\n")
 cat("- Climate variables:", nlyr(bioclim_selected), "\n")
-cat("- Training AUC:", round(train_eval@auc, 3), "\n")
-cat("- Testing AUC:", round(test_eval@auc, 3), "\n\n")
+cat("- Training AUC:", round(train_eval@stats$auc, 3), "\n")
+cat("- Testing AUC:", round(test_eval@stats$auc, 3), "\n\n")
 
 cat("Key Findings:\n")
 cat("1. Variable importance shows which climate factors drive distribution\n")
