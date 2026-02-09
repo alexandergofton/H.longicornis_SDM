@@ -31,6 +31,9 @@ This script performs comprehensive validation of the optimized MaxEnt model befo
 ```{r setup}
 #| message: false
 #| warning: false
+# Set options
+options(java.parameters = "-Xmx12g")
+terra::terraOptions(memfrac = 0.8, tempdir = "temp")
 
 # Core packages
 library(terra)
@@ -46,15 +49,6 @@ library(ENMeval)      # Already have ENMeval results
 library(ggplot2)
 library(patchwork)
 library(viridis)
-
-# Set options
-options(java.parameters = "-Xmx12g")
-terra::terraOptions(memfrac = 0.8, tempdir = "temp")
-
-# Create output directories
-dir.create("outputs", showWarnings = FALSE)
-dir.create("figures", showWarnings = FALSE)
-dir.create("processed_data", showWarnings = FALSE)
 ```
 
 ---
@@ -173,9 +167,9 @@ for (region_out in regions) {
     x = bioclim_selected
   )
 
-  # Extract AUC values
-  auc_train <- eval_train@auc
-  auc_test <- eval_test@auc
+  # Extract AUC values from @stats$auc
+  auc_train <- eval_train@stats$auc
+  auc_test <- eval_test@stats$auc
 
   # Store results
   loro_results <- loro_results %>%
@@ -265,9 +259,10 @@ if (length(suitable_cells) > 0) {
   sampled_coords <- xyFromCell(pred_optimized, sampled_cells)
 
   # Extract climate values at sampled locations
-  pred_env <- extract(bioclim_selected, sampled_coords, ID = FALSE) %>%
-    drop_na() %>%
-    as.matrix()
+# Extract climate values at sampled locations
+pred_env <- extract(bioclim_selected, sampled_coords) %>%  # Remove ID parameter
+  drop_na() %>%
+  as.matrix()
 
   cat(sprintf("✓ Sampled %d points from predicted suitable habitat\n", nrow(pred_env)))
 
@@ -292,6 +287,8 @@ if (length(suitable_cells) > 0) {
   cat(sprintf("\nPCA Variance Explained:\n"))
   cat(sprintf("  PC1: %.1f%%\n", var_explained[1]))
   cat(sprintf("  PC2: %.1f%%\n", var_explained[2]))
+
+  # ... rest of the code
 
   # Plot PCA
   p_pca <- ggplot(pc_scores, aes(x = PC1, y = PC2, color = type)) +
@@ -462,55 +459,88 @@ cat(sprintf("Mean uncertainty (SD): %.4f (SD: %.4f)\n",
 ```
 
 ```{r bootstrap-viz}
-# Visualize uncertainty
-# Create multi-panel plot: mean, SD, coefficient of variation
+library(tidyterra)
+library(patchwork)
 
 # Coefficient of variation (CV = SD / mean)
 bootstrap_cv <- bootstrap_sd / bootstrap_mean
 
-# Plot setup
-par(mfrow = c(2, 2))
+# 1. Mean prediction
+p1 <- ggplot() +
+  geom_spatraster(data = bootstrap_mean) +
+  scale_fill_gradientn(
+    colors = c("lightgrey", "yellow", "orange", "darkorange", "red", "darkred"),
+    na.value = "transparent",
+    name = "Mean\nSuitability"
+  ) +
+  labs(title = "Bootstrap Mean Suitability") +
+  coord_sf() +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    plot.title = element_text(face = "bold", size = 12)
+  )
 
-# Mean prediction
-plot(bootstrap_mean, main = "Bootstrap Mean Suitability",
-     col = viridis(100), axes = FALSE, box = FALSE)
+# 2. Standard deviation
+p2 <- ggplot() +
+  geom_spatraster(data = bootstrap_sd) +
+  scale_fill_gradientn(
+    colors = c("lightgrey", "yellow", "orange", "darkorange", "red", "darkred"),
+    na.value = "transparent",
+    name = "Standard\nDeviation"
+  ) +
+  labs(title = "Bootstrap Standard Deviation (Uncertainty)") +
+  coord_sf() +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    plot.title = element_text(face = "bold", size = 12)
+  )
 
-# Standard deviation
-plot(bootstrap_sd, main = "Bootstrap Standard Deviation (Uncertainty)",
-     col = plasma(100), axes = FALSE, box = FALSE)
+# 3. Coefficient of variation
+p3 <- ggplot() +
+  geom_spatraster(data = bootstrap_cv) +
+  scale_fill_gradientn(
+    colors = c("lightgrey", "lightyellow", "gold", "orange", "darkorange", "red", "darkred"),
+    na.value = "transparent",
+    name = "CV\n(SD/Mean)",
+    limits = c(0, 2)
+  ) +
+  labs(title = "Coefficient of Variation (SD/Mean)") +
+  coord_sf() +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    plot.title = element_text(face = "bold", size = 12)
+  )
 
-# Coefficient of variation
-plot(bootstrap_cv, main = "Coefficient of Variation (SD/Mean)",
-     col = magma(100), axes = FALSE, box = FALSE)
+# 4. Histogram of SD values
+sd_data <- data.frame(sd = as.vector(values(bootstrap_sd))) |>
+  filter(!is.na(sd))
 
-# Histogram of SD values
-hist(values(bootstrap_sd),
-     breaks = 50,
-     col = viridis(1, alpha = 0.7),
-     main = "Distribution of Uncertainty",
-     xlab = "Standard Deviation",
-     ylab = "Frequency")
+p4 <- ggplot(sd_data, aes(x = sd)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribution of Uncertainty",
+    x = "Standard Deviation",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12)
+  )
+
+# Combine plots
+combined <- (p1 + p2) / (p3 + p4)
+
+# Display
+combined
 
 # Save plot
-png("figures/08_bootstrap_uncertainty.png", width = 12, height = 10,
-    units = "in", res = 300)
-par(mfrow = c(2, 2))
-plot(bootstrap_mean, main = "Bootstrap Mean Suitability",
-     col = viridis(100), axes = FALSE, box = FALSE)
-plot(bootstrap_sd, main = "Bootstrap Standard Deviation (Uncertainty)",
-     col = plasma(100), axes = FALSE, box = FALSE)
-plot(bootstrap_cv, main = "Coefficient of Variation (SD/Mean)",
-     col = magma(100), axes = FALSE, box = FALSE)
-hist(values(bootstrap_sd), breaks = 50, col = viridis(1, alpha = 0.7),
-     main = "Distribution of Uncertainty", xlab = "Standard Deviation",
-     ylab = "Frequency")
-dev.off()
+ggsave("figures/08_bootstrap_uncertainty.png", combined,
+       width = 12, height = 10, dpi = 300)
 
 # Calculate uncertainty zones
-# High uncertainty: SD > 0.1
-# Medium uncertainty: 0.05 < SD <= 0.1
-# Low uncertainty: SD <= 0.05
-
 high_uncertainty_pct <- sum(values(bootstrap_sd > 0.1), na.rm = TRUE) /
   sum(!is.na(values(bootstrap_sd))) * 100
 
@@ -538,6 +568,8 @@ uncertainty_summary <- tibble(
 )
 
 write_csv(uncertainty_summary, "processed_data/bootstrap_uncertainty_summary.csv")
+
+cat("\nBootstrap uncertainty visualization saved\n")
 ```
 
 ---
@@ -552,27 +584,29 @@ cat("\n=== Biological Validation ===\n\n")
 # Load full climate data (not just selected variables) for validation
 bioclim_full <- rast("processed_data/bioclim.rds")
 
-# Crop to Australia/NZ extent
-aus_nz_boundary <- st_read("processed_data/aus_nz_boundary.gpkg", quiet = TRUE)
-bioclim_full_aus <- crop(bioclim_full, vect(aus_nz_boundary))
+# Check layer names
+cat("Available layers in bioclim_full:\n")
+print(names(bioclim_full))
+
+# Crop to match pred_optimized extent exactly
+bioclim_full_aus <- crop(bioclim_full, pred_optimized)
+
+# Resample to ensure perfect alignment (in case resolutions differ slightly)
+bioclim_full_aus <- resample(bioclim_full_aus, pred_optimized, method = "bilinear")
 
 # Extract specific layers for validation
-bio6_aus <- bioclim_full_aus[["bio6"]]  # Min Temp Coldest Month
-bio12_aus <- bioclim_full_aus[["bio12"]]  # Annual Precipitation
-
-# Load optimized prediction
-pred_opt <- rast("processed_data/maxent_optimized_prediction_aus.tif")
+bio6_aus <- bioclim_full_aus[[6]]   # Min Temp Coldest Month (6th layer)
+bio12_aus <- bioclim_full_aus[[12]] # Annual Precipitation (12th layer)
+bio1_aus <- bioclim_full_aus[[1]]   # Annual Mean Temperature (1st layer)
 
 # Define thresholds (from literature)
 cold_tolerance_threshold <- -8.1  # °C (Yoder & Benoit 2003)
 moisture_threshold <- 1000  # mm (Rochlin et al. 2019)
 
 # 1. Cold Tolerance Check
-# Where winter minimum < -8.1°C, suitability should be low
 too_cold <- bio6_aus < cold_tolerance_threshold
 
-# Mean suitability in areas too cold
-suit_in_cold <- global(ifel(too_cold, pred_opt, NA), "mean", na.rm = TRUE)[1,1]
+suit_in_cold <- global(ifel(too_cold, pred_optimized, NA), "mean", na.rm = TRUE)[1,1]
 pct_area_too_cold <- sum(values(too_cold), na.rm = TRUE) /
   sum(!is.na(values(too_cold))) * 100
 
@@ -583,11 +617,9 @@ cat(sprintf("   Mean suitability in cold areas: %.4f\n", suit_in_cold))
 cat(sprintf("   ✓ PASS: Suitability should be low (<0.2)\n\n"))
 
 # 2. Moisture Requirement Check
-# Where annual precip < 1000mm, suitability should be low/moderate
 too_dry <- bio12_aus < moisture_threshold
 
-# Mean suitability in dry areas
-suit_in_dry <- global(ifel(too_dry, pred_opt, NA), "mean", na.rm = TRUE)[1,1]
+suit_in_dry <- global(ifel(too_dry, pred_optimized, NA), "mean", na.rm = TRUE)[1,1]
 pct_area_too_dry <- sum(values(too_dry), na.rm = TRUE) /
   sum(!is.na(values(too_dry))) * 100
 
@@ -598,31 +630,33 @@ cat(sprintf("   Mean suitability in dry areas: %.4f\n", suit_in_dry))
 cat(sprintf("   ✓ PASS: Suitability should be low (<0.3)\n\n"))
 
 # 3. Known Distribution Alignment
-# High suitability should align with eastern coastal regions
+eastern_coast <- (bio1_aus > 10) & (bio12_aus > 800)
 
-# Define eastern coastal region (rough approximation)
-eastern_coast <- (bioclim_full_aus[["bio1"]] > 10) & (bio12_aus > 800)
-
-suit_eastern <- global(ifel(eastern_coast, pred_opt, NA), "mean", na.rm = TRUE)[1,1]
-pct_eastern_suitable <- sum(values(eastern_coast & pred_opt > 0.5), na.rm = TRUE) /
+suit_eastern <- global(ifel(eastern_coast, pred_optimized, NA), "mean", na.rm = TRUE)[1,1]
+pct_eastern_suitable <- sum(values(eastern_coast & pred_optimized > 0.5), na.rm = TRUE) /
   sum(values(eastern_coast), na.rm = TRUE) * 100
+pct_area_eastern <- sum(values(eastern_coast), na.rm = TRUE) /  # ADD THIS
+  sum(!is.na(values(eastern_coast))) * 100
 
 cat("3. Geographic Distribution Validation\n")
 cat(sprintf("   Eastern coastal region mean suitability: %.4f\n", suit_eastern))
-cat(sprintf("   % of eastern coast predicted suitable: %.1f%%\n", pct_eastern_suitable))
+cat(sprintf("   Area meeting eastern coast criteria: %.1f%%\n", pct_area_eastern))  # ADD THIS
+cat(sprintf("   %% of eastern coast predicted suitable: %.1f%%\n", pct_eastern_suitable))
 cat(sprintf("   ✓ PASS: Eastern coast should have high suitability\n\n"))
 
 # 4. Arid Interior Check
-# Central/western arid regions should have low suitability
-arid_interior <- (bio12_aus < 500) & (bioclim_full_aus[["bio1"]] > 15)
+arid_interior <- (bio12_aus < 500) & (bio1_aus > 15)
 
-suit_arid <- global(ifel(arid_interior, pred_opt, NA), "mean", na.rm = TRUE)[1,1]
-pct_arid_suitable <- sum(values(arid_interior & pred_opt > 0.3), na.rm = TRUE) /
+suit_arid <- global(ifel(arid_interior, pred_optimized, NA), "mean", na.rm = TRUE)[1,1]
+pct_arid_suitable <- sum(values(arid_interior & pred_optimized > 0.3), na.rm = TRUE) /
   sum(values(arid_interior), na.rm = TRUE) * 100
+pct_area_arid <- sum(values(arid_interior), na.rm = TRUE) /  # ADD THIS
+  sum(!is.na(values(arid_interior))) * 100
 
 cat("4. Arid Interior Validation\n")
 cat(sprintf("   Mean suitability in arid interior: %.4f\n", suit_arid))
-cat(sprintf("   % of arid areas predicted suitable: %.1f%%\n", pct_arid_suitable))
+cat(sprintf("   Area meeting arid interior criteria: %.1f%%\n", pct_area_arid))  # ADD THIS
+cat(sprintf("   %% of arid areas predicted suitable: %.1f%%\n", pct_arid_suitable))
 cat(sprintf("   ✓ PASS: Arid interior should have very low suitability\n\n"))
 
 # Save biological validation summary
@@ -633,7 +667,8 @@ bio_validation <- tibble(
                 sprintf("BIO12 > %d mm", moisture_threshold),
                 "BIO1 > 10°C & BIO12 > 800mm",
                 "BIO12 < 500mm & BIO1 > 15°C"),
-  area_pct = c(pct_area_too_cold, pct_area_too_dry, NA, NA),
+  area_pct = c(pct_area_too_cold, pct_area_too_dry,
+               pct_area_eastern, pct_area_arid),  # UPDATED
   mean_suitability = c(suit_in_cold, suit_in_dry, suit_eastern, suit_arid),
   validation = c(
     ifelse(suit_in_cold < 0.2, "PASS", "FAIL"),
@@ -654,105 +689,75 @@ print(bio_validation)
 ## 5. Final Validation Summary
 
 ```{r final-summary}
-cat("\n\n")
-cat("╔════════════════════════════════════════════════════════════════╗\n")
-cat("║         STEP 8: FINAL MODEL VALIDATION - SUMMARY              ║\n")
-cat("╠════════════════════════════════════════════════════════════════╣\n")
+cat("\n=== STEP 8: FINAL MODEL VALIDATION SUMMARY ===\n\n")
 
-# 1. LORO Results
-cat("║ 1. LEAVE-ONE-REGION-OUT CROSS-VALIDATION                      ║\n")
-cat("╠════════════════════════════════════════════════════════════════╣\n")
+# 1. Leave-One-Region-Out Cross-Validation
+cat("1. LEAVE-ONE-REGION-OUT CROSS-VALIDATION\n")
 if (nrow(loro_results) > 0) {
-  for (i in 1:nrow(loro_results)) {
-    cat(sprintf("║   %s (n=%d test)\n",
-                loro_results$excluded_region[i],
-                loro_results$n_test[i]))
-    cat(sprintf("║     Training AUC: %.3f | Test AUC: %.3f | Diff: %.3f\n",
-                loro_results$auc_train[i],
-                loro_results$auc_test[i],
-                loro_results$auc_diff[i]))
-  }
+  print(loro_results |> select(excluded_region, n_test, auc_train, auc_test, auc_diff))
 
   mean_test_auc <- mean(loro_results$auc_test, na.rm = TRUE)
-  cat("╠════════════════════════════════════════════════════════════════╣\n")
-  cat(sprintf("║   Mean Test AUC: %.3f                                      ║\n",
-              mean_test_auc))
+  cat(sprintf("\n   Mean Test AUC: %.3f\n", mean_test_auc))
 
   if (mean_test_auc > 0.75) {
-    cat("║   ✓ EXCELLENT transferability across regions                  ║\n")
+    cat("   ✓ EXCELLENT transferability across regions\n")
   } else if (mean_test_auc > 0.7) {
-    cat("║   ✓ GOOD transferability across regions                       ║\n")
+    cat("   ✓ GOOD transferability across regions\n")
   } else {
-    cat("║   ⚠ MODERATE transferability - consider region-specific models║\n")
+    cat("   ⚠ MODERATE transferability - consider region-specific models\n")
   }
 }
 
-# 2. Environmental Space
-cat("╠════════════════════════════════════════════════════════════════╣\n")
-cat("║ 2. ENVIRONMENTAL SPACE VALIDATION                              ║\n")
-cat("╠════════════════════════════════════════════════════════════════╣\n")
+# 2. Environmental Space Validation
+cat("\n2. ENVIRONMENTAL SPACE VALIDATION\n")
 if (exists("var_explained")) {
-  cat(sprintf("║   PC1 variance: %.1f%% | PC2 variance: %.1f%%\n",
+  cat(sprintf("   PC1 variance: %.1f%% | PC2 variance: %.1f%%\n",
               var_explained[1], var_explained[2]))
-  cat("║   ✓ Occurrence and predicted climates overlap in PCA space    ║\n")
+  cat("   ✓ Occurrence and predicted climates overlap in PCA space\n")
 }
 
-# 3. Bootstrap Uncertainty
-cat("╠════════════════════════════════════════════════════════════════╣\n")
-cat("║ 3. BOOTSTRAP UNCERTAINTY QUANTIFICATION                        ║\n")
-cat("╠════════════════════════════════════════════════════════════════╣\n")
-cat(sprintf("║   Iterations: %d                                            ║\n",
-            n_bootstrap))
-cat(sprintf("║   Mean suitability: %.4f                                   ║\n",
+# 3. Bootstrap Uncertainty Quantification
+cat("\n3. BOOTSTRAP UNCERTAINTY QUANTIFICATION\n")
+cat(sprintf("   Iterations: %d\n", n_bootstrap))
+cat(sprintf("   Mean suitability: %.4f\n",
             global(bootstrap_mean, "mean", na.rm = TRUE)[1,1]))
-cat(sprintf("║   Mean uncertainty (SD): %.4f                              ║\n",
+cat(sprintf("   Mean uncertainty (SD): %.4f\n",
             global(bootstrap_sd, "mean", na.rm = TRUE)[1,1]))
-cat("╠════════════════════════════════════════════════════════════════╣\n")
-cat(sprintf("║   High uncertainty areas:   %.1f%%\n", high_uncertainty_pct))
-cat(sprintf("║   Medium uncertainty areas: %.1f%%\n", med_uncertainty_pct))
-cat(sprintf("║   Low uncertainty areas:    %.1f%%\n", low_uncertainty_pct))
+cat(sprintf("   High uncertainty areas:   %.1f%%\n", high_uncertainty_pct))
+cat(sprintf("   Medium uncertainty areas: %.1f%%\n", med_uncertainty_pct))
+cat(sprintf("   Low uncertainty areas:    %.1f%%\n", low_uncertainty_pct))
 
-# 4. Biological Validation
-cat("╠════════════════════════════════════════════════════════════════╣\n")
-cat("║ 4. BIOLOGICAL REALITY CHECKS                                   ║\n")
-cat("╠════════════════════════════════════════════════════════════════╣\n")
+# 4. Biological Reality Checks
+cat("\n4. BIOLOGICAL REALITY CHECKS\n")
 for (i in 1:nrow(bio_validation)) {
   status_symbol <- ifelse(bio_validation$validation[i] == "PASS", "✓", "✗")
-  cat(sprintf("║   %s %s: %.4f (%s)\n",
+  cat(sprintf("   %s %-25s %.4f (%s)\n",
               status_symbol,
-              bio_validation$constraint[i],
+              paste0(bio_validation$constraint[i], ":"),
               bio_validation$mean_suitability[i],
               bio_validation$validation[i]))
 }
 
 # Overall Assessment
-cat("╠════════════════════════════════════════════════════════════════╣\n")
-cat("║ OVERALL MODEL VALIDATION STATUS                                ║\n")
-cat("╠════════════════════════════════════════════════════════════════╣\n")
+cat("\n=== OVERALL VALIDATION STATUS ===\n")
 
 all_bio_pass <- all(bio_validation$validation == "PASS")
 loro_good <- if(nrow(loro_results) > 0) mean(loro_results$auc_test) > 0.7 else TRUE
 
 if (all_bio_pass && loro_good) {
-  cat("║                                                                ║\n")
-  cat("║   ✓✓✓ MODEL VALIDATION SUCCESSFUL ✓✓✓                         ║\n")
-  cat("║                                                                ║\n")
-  cat("║   The optimized MaxEnt model demonstrates:                    ║\n")
-  cat("║   • Good transferability across geographic regions            ║\n")
-  cat("║   • Realistic environmental space coverage                    ║\n")
-  cat("║   • Acceptable prediction uncertainty                         ║\n")
-  cat("║   • Alignment with known biological constraints               ║\n")
-  cat("║                                                                ║\n")
-  cat("║   ➜ READY TO PROCEED to Step 9 (Future Climate Data)          ║\n")
-  cat("║                                                                ║\n")
+  cat("\n✓✓✓ MODEL VALIDATION SUCCESSFUL ✓✓✓\n\n")
+  cat("The optimized MaxEnt model demonstrates:\n")
+  cat("  • Good transferability across geographic regions\n")
+  cat("  • Realistic environmental space coverage\n")
+  cat("  • Acceptable prediction uncertainty\n")
+  cat("  • Alignment with known biological constraints\n\n")
+  cat("➜ READY TO PROCEED to Step 9 (Future Climate Projections)\n\n")
 } else {
-  cat("║   ⚠ VALIDATION CONCERNS IDENTIFIED                            ║\n")
-  cat("║   Review failed checks before proceeding to projections       ║\n")
+  cat("\n⚠ VALIDATION CONCERNS IDENTIFIED\n")
+  cat("Review failed checks before proceeding to projections\n\n")
 }
 
-cat("╚════════════════════════════════════════════════════════════════╝\n\n")
-
-# Save final summary
+# Save summary table
 validation_summary <- tibble(
   validation_component = c("Leave-One-Region-Out", "Environmental Space",
                           "Bootstrap Uncertainty", "Biological Validation"),
@@ -774,7 +779,11 @@ validation_summary <- tibble(
   )
 )
 
+cat("\nValidation Summary Table:\n")
+print(validation_summary)
+
 write_csv(validation_summary, "processed_data/final_validation_summary.csv")
+cat("\nSummary saved to: processed_data/final_validation_summary.csv\n")
 ```
 
 ---
