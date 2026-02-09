@@ -510,6 +510,71 @@ ggsave(paste0(figures_dir, "05_prediction_australia_nz.png"),
 
 ```
 
+```{r}
+# Leaflet map
+library(leaflet)
+library(leaflet.extras2)
+
+# Convert prediction to a color palette
+# First, create a color function
+pal <- colorNumeric(
+  palette = c("white", "darkred"),
+  domain = values(prediction_aus, na.rm = TRUE),
+  na.color = "transparent"
+)
+
+# Filter presence points to Australia/NZ region
+aus_presence <- presence_coords |>
+  filter(lon >= 110, lon <= 180, lat >= -48, lat <= -10)
+
+# Create leaflet map
+aus_map <- leaflet() |>
+  addProviderTiles(providers$CartoDB.Positron) |>
+  addRasterImage(
+    prediction_aus,
+    colors = pal,
+    opacity = 0.8,
+    group = "Habitat Suitability"
+  ) |>
+  addCircleMarkers(
+    data = aus_presence,
+    lng = ~lon,
+    lat = ~lat,
+    radius = 4,
+    color = "black",
+    fillColor = "black",
+    fillOpacity = 0.7,
+    stroke = TRUE,
+    weight = 1,
+    group = "Occurrence Points",
+    popup = ~paste("Lon:", round(lon, 3), "<br>Lat:", round(lat, 3))
+  ) |>
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = values(prediction_aus, na.rm = TRUE),
+    title = "Habitat<br>Suitability",
+    labFormat = labelFormat(
+      suffix = "%",
+      transform = function(x) x * 100
+    )
+  ) |>
+  addLayersControl(
+    overlayGroups = c("Habitat Suitability", "Occurrence Points"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) |>
+  setView(lng = 145, lat = -25, zoom = 4)
+
+aus_map
+
+# Save as HTML
+library(htmlwidgets)
+saveWidget(
+  aus_map,
+  file = paste0(figures_dir, "05_interactive_map_australia_nz.html"),
+  selfcontained = TRUE
+)
+```
 
 ## Response Curves
 
