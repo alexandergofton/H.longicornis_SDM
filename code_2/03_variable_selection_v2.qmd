@@ -1,0 +1,712 @@
+---
+title: "Step 3: Data-Driven Variable Selection"
+author: "Alexander W. Gofton"
+date: today
+format: gfm
+---
+
+## Overview
+
+This script performs systematic, data-driven variable selection for the revised
+SDM. Key changes from v1:
+
+- **Variable swaps:** BIO6 → BIO11 (Mean Temp Coldest Quarter), BIO5 → BIO10
+  (Mean Temp Warmest Quarter)
+- **Expanded candidate pool:** includes ENVIREM (CMI, aridity, PET) and CHELSA (VPD)
+  alongside WorldClim bioclimatic variables
+- **Data-driven process:** correlation analysis → VIF filtering → preliminary
+  MaxEnt jackknife → ecological interpretation → final VIF check
+- **Stricter thresholds:** |r| > 0.7 for correlation (was 0.8), VIF < 5 for
+  final set
+
+Target: 5–8 uncorrelated, biologically relevant variables.
+
+```{r}
+#| label: setup
+#| message: false
+
+# Set Java memory for MaxEnt before loading rJava
+options(java.parameters = "-Xmx8g")
+
+library(tidyverse)
+library(terra)
+library(corrplot)
+library(usdm)       # VIF analysis
+library(predicts)    # MaxEnt via predicts package
+library(rJava)
+library(ggcorrplot)
+```
+
+```{r}
+#| label: paths
+
+base_dir <- here::here()
+processed_v2 <- file.path(base_dir, "processed_data_2")
+figures_dir  <- file.path(base_dir, "figures_2")
+outputs_dir  <- file.path(base_dir, "outputs_2")
+```
+
+
+## 1. Load data from Steps 1–2
+
+```{r}
+#| label: load-data
+
+# Occurrence data with all climate values (from Step 2)
+occ <- read_csv(file.path(processed_v2, "occurrences_with_climate.csv"),
+                show_col_types = FALSE)
+
+# Full environmental raster stack (from Step 2)
+env_all <- readRDS(file.path(processed_v2, "env_all_global.rds"))
+
+sprintf("Occurrence records: %d", nrow(occ))
+sprintf("Environmental layers: %d (%s)", nlyr(env_all), paste(names(env_all), collapse = ", "))
+sprintf("Regions: %s", paste(unique(occ$region), collapse = ", "))
+```
+
+
+## 2. Exclude problematic variables and apply swaps
+
+Remove BIO8, BIO9, BIO18, BIO19 (known WorldClim spatial artifacts), and drop
+BIO5 and BIO6 in favour of BIO10 and BIO11.
+
+```{r}
+#| label: define-candidates
+
+# Variables to exclude entirely
+drop_vars <- c("bio8", "bio9", "bio18", "bio19",  # spatial artifacts
+               "bio5",                              # replaced by bio10
+               "bio6")                              # replaced by bio11
+
+# Define the candidate pool with ecological rationale
+candidate_info <- tribble(
+  ~variable,     ~source,    ~ecological_role,
+  "bio1",        "WorldClim", "Annual mean temperature — overall thermal regime",
+  "bio2",        "WorldClim", "Mean diurnal range — daily temp variability",
+  "bio3",        "WorldClim", "Isothermality — ratio of diurnal to annual range",
+  "bio4",        "WorldClim", "Temperature seasonality — thermal variability",
+  "bio7",        "WorldClim", "Temperature annual range — thermal extremes",
+  "bio10",       "WorldClim", "Mean temp warmest quarter — summer activity window",
+  "bio11",       "WorldClim", "Mean temp coldest quarter — cold tolerance limit",
+  "bio12",       "WorldClim", "Annual precipitation — total moisture input",
+  "bio13",       "WorldClim", "Precipitation of wettest month — peak moisture",
+  "bio14",       "WorldClim", "Precipitation of driest month — drought stress",
+  "bio15",       "WorldClim", "Precipitation seasonality — temporal moisture pattern",
+  "bio16",       "WorldClim", "Precipitation of wettest quarter — wet season total",
+  "bio17",       "WorldClim", "Precipitation of driest quarter — dry season total",
+  "cmi",         "ENVIREM",   "Climatic moisture index — P/PET balance",
+  "aridity",     "ENVIREM",   "Thornthwaite aridity index — desiccation risk",
+  "pet_annual",  "ENVIREM",   "Annual PET — evaporative demand"
+)
+
+# Add VPD if it was successfully downloaded
+if ("vpd_annual" %in% names(occ)) {
+  candidate_info <- candidate_info %>%
+    add_row(variable = "vpd_annual", source = "CHELSA",
+            ecological_role = "Vapor pressure deficit — atmospheric drying power")
+}
+
+candidate_vars <- candidate_info$variable
+
+# Verify all candidates exist in the data
+available <- candidate_vars[candidate_vars %in% names(occ)]
+missing   <- candidate_vars[!candidate_vars %in% names(occ)]
+
+if (length(missing) > 0) {
+  warning(sprintf("Missing from data: %s", paste(missing, collapse = ", ")))
+  candidate_vars <- available
+}
+
+candidate_info <- candidate_info %>% filter(variable %in% candidate_vars)
+candidate_info
+```
+
+
+## 3. Correlation analysis
+
+```{r}
+#| label: correlation-matrix
+
+# Extract climate values at occurrence points for candidate variables
+climate_matrix <- occ %>%
+  select(all_of(candidate_vars)) %>%
+  drop_na()
+
+# Pearson correlation
+cor_matrix <- cor(climate_matrix, use = "pairwise.complete.obs")
+```
+
+```{r}
+#| label: fig-correlation-full
+#| fig-cap: "Pairwise Pearson correlation among all candidate environmental variables."
+#| fig-width: 10
+#| fig-height: 10
+
+ggcorrplot(
+  cor_matrix,
+  type = "lower",
+  lab = TRUE,
+  lab_size = 2.5,
+  colors = c("#B2182B", "white", "#2166AC"),
+  title = "Correlation matrix: all candidate variables"
+)
+
+ggsave(file.path(figures_dir, "03_correlation_full_candidates.png"),
+       width = 10, height = 10, dpi = 300)
+```
+
+### Identify highly correlated pairs (|r| > 0.7)
+
+```{r}
+#| label: high-correlations
+
+# Extract pairs with |r| > 0.7
+cor_pairs <- as.data.frame(as.table(cor_matrix)) %>%
+  rename(var1 = Var1, var2 = Var2, correlation = Freq) %>%
+  filter(var1 != var2) %>%
+  mutate(abs_cor = abs(correlation)) %>%
+  filter(abs_cor > 0.7) %>%
+  # Remove duplicate pairs (keep one direction)
+  rowwise() %>%
+  mutate(pair = paste(sort(c(as.character(var1), as.character(var2))), collapse = " - ")) %>%
+  ungroup() %>%
+  distinct(pair, .keep_all = TRUE) %>%
+  arrange(desc(abs_cor)) %>%
+  select(pair, correlation, abs_cor)
+
+sprintf("Number of variable pairs with |r| > 0.7: %d", nrow(cor_pairs))
+cor_pairs
+```
+
+
+## 4. Initial VIF analysis
+
+Variance Inflation Factor identifies multicollinearity issues. VIF > 10
+indicates severe problems; we use a stepwise procedure to iteratively drop
+the highest-VIF variable.
+
+```{r}
+#| label: vif-initial
+
+# Run VIF on all candidate variables
+# usdm::vifstep drops variables iteratively until all VIF < threshold
+vif_initial <- vif(climate_matrix)
+vif_initial_df <- as.data.frame(vif_initial) %>% arrange(desc(VIF))
+vif_initial_df
+```
+
+```{r}
+#| label: vifstep
+
+# Stepwise VIF reduction with threshold = 10
+vif_reduced <- vifstep(climate_matrix, th = 10)
+
+# Variables retained after VIF reduction
+vars_after_vif <- vif_reduced@results$Variables
+sprintf("Variables retained after VIF < 10: %d", length(vars_after_vif))
+vars_after_vif
+```
+
+```{r}
+#| label: vif-excluded
+
+# Variables removed by vifstep
+vars_excluded_vif <- setdiff(candidate_vars, vars_after_vif)
+sprintf("Variables removed by VIF: %s", paste(vars_excluded_vif, collapse = ", "))
+```
+
+
+## 5. Correlation-based refinement
+
+After VIF filtering, check remaining pairwise correlations. If any pair
+still exceeds |r| > 0.7, drop the less ecologically interpretable one.
+
+```{r}
+#| label: post-vif-correlation
+
+climate_reduced <- climate_matrix %>% select(all_of(vars_after_vif))
+cor_reduced <- cor(climate_reduced, use = "pairwise.complete.obs")
+
+# Check for remaining high correlations
+high_cor_remaining <- as.data.frame(as.table(cor_reduced)) %>%
+  rename(var1 = Var1, var2 = Var2, correlation = Freq) %>%
+  filter(var1 != var2, abs(correlation) > 0.7) %>%
+  rowwise() %>%
+  mutate(pair = paste(sort(c(as.character(var1), as.character(var2))), collapse = " - ")) %>%
+  ungroup() %>%
+  distinct(pair, .keep_all = TRUE) %>%
+  arrange(desc(abs(correlation)))
+
+if (nrow(high_cor_remaining) > 0) {
+  sprintf("WARNING: %d pairs still have |r| > 0.7 after VIF filtering:", nrow(high_cor_remaining))
+  print(high_cor_remaining)
+
+  # Ecological priority rules for resolving remaining correlations:
+  # - Prefer broader-scale variables (quarterly > monthly)
+  # - Prefer moisture-balance vars (CMI) over raw precipitation components
+  # - Prefer temperature means over ranges
+  # - Keep at least one variable from each ecological axis:
+  #   (1) thermal regime, (2) cold tolerance, (3) heat/activity,
+  #   (4) moisture amount, (5) moisture balance/desiccation
+
+  # Build removal list based on ecological priority
+  # This section handles common problematic pairs programmatically
+  to_remove <- character(0)
+
+  for (i in seq_len(nrow(high_cor_remaining))) {
+    v1 <- as.character(high_cor_remaining$var1[i])
+    v2 <- as.character(high_cor_remaining$var2[i])
+
+    # Skip if one is already flagged for removal
+    if (v1 %in% to_remove | v2 %in% to_remove) next
+
+    # Priority rules: remove the less informative variable
+    # Precipitation subsets are less useful than annual totals or CMI
+    precip_subset <- c("bio13", "bio14", "bio16", "bio17")
+    if (v1 %in% precip_subset & !(v2 %in% precip_subset)) {
+      to_remove <- c(to_remove, v1)
+    } else if (v2 %in% precip_subset & !(v1 %in% precip_subset)) {
+      to_remove <- c(to_remove, v2)
+    }
+    # Range variables are less informative than direct measurements
+    else if (v1 %in% c("bio2", "bio4", "bio7") & !(v2 %in% c("bio2", "bio4", "bio7"))) {
+      to_remove <- c(to_remove, v1)
+    } else if (v2 %in% c("bio2", "bio4", "bio7") & !(v1 %in% c("bio2", "bio4", "bio7"))) {
+      to_remove <- c(to_remove, v2)
+    }
+    # If PET is correlated with aridity or CMI, keep the moisture balance variable
+    else if ("pet_annual" %in% c(v1, v2) & any(c("cmi", "aridity") %in% c(v1, v2))) {
+      to_remove <- c(to_remove, "pet_annual")
+    }
+    # Default: remove the one with higher mean VIF across all pairs
+    else {
+      vif_v1 <- vif_initial_df$VIF[vif_initial_df$Variables == v1]
+      vif_v2 <- vif_initial_df$VIF[vif_initial_df$Variables == v2]
+      if (length(vif_v1) > 0 & length(vif_v2) > 0) {
+        to_remove <- c(to_remove, ifelse(vif_v1 > vif_v2, v1, v2))
+      }
+    }
+  }
+
+  to_remove <- unique(to_remove)
+  if (length(to_remove) > 0) {
+    sprintf("Removing based on ecological priority: %s", paste(to_remove, collapse = ", "))
+    vars_after_cor <- setdiff(vars_after_vif, to_remove)
+  } else {
+    vars_after_cor <- vars_after_vif
+  }
+
+} else {
+  message("All remaining pairs have |r| <= 0.7 — no further correlation-based removal needed.")
+  vars_after_cor <- vars_after_vif
+}
+
+sprintf("Variables after correlation refinement: %d", length(vars_after_cor))
+vars_after_cor
+```
+
+
+## 6. Preliminary MaxEnt for variable importance
+
+Run a quick MaxEnt model with the remaining variables to assess permutation
+importance and jackknife contributions. Variables contributing < 2% will be
+flagged for potential removal (unless ecologically critical).
+
+```{r}
+#| label: preliminary-maxent
+
+# Prepare data for MaxEnt
+# We need: presence coordinates + background coordinates + climate rasters
+
+# Subset the environmental stack to remaining variables
+env_subset <- env_all[[vars_after_cor]]
+
+# Presence coordinates
+presence_coords <- occ %>%
+  filter(!is.na(lon), !is.na(lat)) %>%
+  select(lon, lat) %>%
+  as.data.frame()
+
+# Generate temporary background points (10,000 random from global raster)
+# NOTE: This is a preliminary model for variable selection only.
+# The proper accessible-area background will be defined in Step 4.
+set.seed(123)
+bg_sample <- spatSample(env_subset, size = 10000, method = "random",
+                        na.rm = TRUE, xy = TRUE, values = FALSE)
+bg_coords <- as.data.frame(bg_sample) %>%
+  rename(lon = x, lat = y)
+
+# Fit a preliminary MaxEnt model with default settings
+maxent_prelim <- MaxEnt(
+  x = env_subset,
+  p = as.matrix(presence_coords),
+  a = as.matrix(bg_coords),
+  args = c(
+    "responsecurves=true",
+    "jackknife=true",
+    "outputformat=cloglog"
+  )
+)
+
+sprintf("Preliminary MaxEnt fitted with %d variables", length(vars_after_cor))
+```
+
+```{r}
+#| label: variable-importance
+
+# Extract variable importance from the MaxEnt model
+# MaxEnt reports both percent contribution and permutation importance
+var_importance <- tibble(
+  variable = vars_after_cor,
+  contribution_pct = maxent_prelim@results[
+    paste0(vars_after_cor, ".contribution"), ],
+  permutation_pct = maxent_prelim@results[
+    paste0(vars_after_cor, ".permutation.importance"), ]
+) %>%
+  arrange(desc(permutation_pct))
+
+var_importance
+```
+
+```{r}
+#| label: fig-variable-importance
+#| fig-cap: "Variable importance from preliminary MaxEnt model (permutation importance)."
+#| fig-width: 8
+#| fig-height: 5
+
+var_importance %>%
+  pivot_longer(cols = c(contribution_pct, permutation_pct),
+               names_to = "metric", values_to = "importance") %>%
+  mutate(
+    metric = ifelse(metric == "contribution_pct",
+                    "Percent contribution", "Permutation importance"),
+    variable = fct_reorder(variable, importance, .fun = max)
+  ) %>%
+  ggplot(aes(x = importance, y = variable, fill = metric)) +
+  geom_col(position = "dodge", width = 0.6) +
+  scale_fill_manual(values = c("Percent contribution" = "grey60",
+                                "Permutation importance" = "steelblue")) +
+  labs(
+    title = "Variable importance (preliminary MaxEnt)",
+    x = "Importance (%)", y = NULL, fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(figures_dir, "03_variable_importance_preliminary.png"),
+       width = 8, height = 5, dpi = 300)
+```
+
+
+## 7. Drop low-importance variables
+
+Remove variables with < 2% permutation importance, unless they fill an
+ecological axis not covered by other retained variables. The key axes are:
+
+1. **Thermal regime** — overall temperature (bio1)
+2. **Cold tolerance** — winter cold (bio11)
+3. **Warm season activity** — summer heat (bio10)
+4. **Moisture amount** — total precipitation (bio12)
+5. **Moisture balance / desiccation** — CMI, aridity, or VPD
+
+```{r}
+#| label: drop-low-importance
+
+importance_threshold <- 2.0
+
+# Ecological axis assignments
+axis_assignments <- tribble(
+  ~variable,     ~axis,
+  "bio1",        "thermal_regime",
+  "bio2",        "temp_variability",
+  "bio3",        "temp_stability",
+  "bio4",        "temp_variability",
+  "bio7",        "temp_variability",
+  "bio10",       "warm_season",
+  "bio11",       "cold_tolerance",
+  "bio12",       "moisture_amount",
+  "bio13",       "moisture_amount",
+  "bio14",       "moisture_amount",
+  "bio15",       "moisture_seasonality",
+  "bio16",       "moisture_amount",
+  "bio17",       "moisture_amount",
+  "cmi",         "moisture_balance",
+  "aridity",     "moisture_balance",
+  "pet_annual",  "moisture_balance",
+  "vpd_annual",  "moisture_balance"
+)
+
+var_with_axes <- var_importance %>%
+  left_join(axis_assignments, by = "variable")
+
+# Identify low-importance variables
+low_importance <- var_with_axes %>%
+  filter(permutation_pct < importance_threshold)
+
+# Check if removing them would leave any axis uncovered
+axes_covered <- var_with_axes %>%
+  filter(permutation_pct >= importance_threshold) %>%
+  pull(axis) %>%
+  unique()
+
+# Protect variables whose axis would otherwise be lost
+protected <- low_importance %>%
+  filter(!axis %in% axes_covered)
+
+if (nrow(protected) > 0) {
+  sprintf("Protecting %d low-importance variable(s) that cover unique axes: %s",
+          nrow(protected), paste(protected$variable, collapse = ", "))
+}
+
+# Remove unprotected low-importance variables
+to_drop_importance <- low_importance %>%
+  filter(axis %in% axes_covered) %>%
+  pull(variable)
+
+if (length(to_drop_importance) > 0) {
+  sprintf("Dropping low-importance variables: %s", paste(to_drop_importance, collapse = ", "))
+  vars_after_importance <- setdiff(vars_after_cor, to_drop_importance)
+} else {
+  message("No variables dropped by importance filter.")
+  vars_after_importance <- vars_after_cor
+}
+
+sprintf("Variables after importance filter: %d", length(vars_after_importance))
+vars_after_importance
+```
+
+
+## 8. Final VIF and correlation verification
+
+Confirm the final variable set passes both VIF < 5 and all pairwise |r| < 0.7.
+
+```{r}
+#| label: final-vif-check
+
+climate_final <- climate_matrix %>% select(all_of(vars_after_importance))
+
+# Final VIF
+vif_final <- vif(climate_final)
+vif_final_df <- as.data.frame(vif_final) %>% arrange(desc(VIF))
+
+all_vif_ok <- all(vif_final_df$VIF < 5)
+sprintf("Final VIF check (all < 5): %s", all_vif_ok)
+vif_final_df
+```
+
+```{r}
+#| label: final-correlation-check
+
+cor_final <- cor(climate_final, use = "pairwise.complete.obs")
+
+# Check max absolute correlation
+max_cor_pairs <- as.data.frame(as.table(cor_final)) %>%
+  filter(Var1 != Var2) %>%
+  mutate(abs_cor = abs(Freq)) %>%
+  arrange(desc(abs_cor)) %>%
+  head(5)
+
+all_cor_ok <- max(max_cor_pairs$abs_cor) < 0.7
+sprintf("Final correlation check (all |r| < 0.7): %s (max = %.3f)",
+        all_cor_ok, max(max_cor_pairs$abs_cor))
+max_cor_pairs
+```
+
+```{r}
+#| label: fig-correlation-final
+#| fig-cap: "Correlation matrix of the final selected variable set."
+#| fig-width: 8
+#| fig-height: 8
+
+ggcorrplot(
+  cor_final,
+  type = "lower",
+  lab = TRUE,
+  lab_size = 3.5,
+  colors = c("#B2182B", "white", "#2166AC"),
+  title = sprintf("Final variable set: %d variables (all |r| < 0.7, VIF < 5)",
+                  length(vars_after_importance))
+)
+
+ggsave(file.path(figures_dir, "03_correlation_final_selected.png"),
+       width = 8, height = 8, dpi = 300)
+```
+
+
+## 9. Document the temperature range
+
+Verify BIO1 values at occurrence points match expectations from the literature
+(Heath 2016: optimum activity ~25–40°C; cold limit approximately -2°C; Lawrence
+et al. 2017: mean annual temp > 12°C as habitat threshold).
+
+```{r}
+#| label: temperature-check
+
+temp_summary <- occ %>%
+  summarise(
+    bio1_min   = min(bio1, na.rm = TRUE),
+    bio1_max   = max(bio1, na.rm = TRUE),
+    bio1_mean  = mean(bio1, na.rm = TRUE),
+    bio1_sd    = sd(bio1, na.rm = TRUE),
+    bio11_min  = min(bio11, na.rm = TRUE),
+    bio11_max  = max(bio11, na.rm = TRUE),
+    bio10_min  = min(bio10, na.rm = TRUE),
+    bio10_max  = max(bio10, na.rm = TRUE),
+    pct_bio1_above_12C = round(100 * mean(bio1 > 12, na.rm = TRUE), 1)
+  ) %>%
+  pivot_longer(everything(), names_to = "Metric", values_to = "Value") %>%
+  mutate(Value = round(Value, 2))
+
+temp_summary
+```
+
+
+## 10. Climate space visualisation
+
+```{r}
+#| label: fig-climate-space
+#| fig-cap: "Climate space of occurrence points for selected variables, coloured by region."
+#| fig-width: 10
+#| fig-height: 8
+
+# Select a few key pairs to visualise
+p1 <- ggplot(occ, aes(x = bio1, y = bio12, colour = region)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  scale_colour_brewer(palette = "Set1") +
+  labs(x = "BIO1: Annual Mean Temp (°C)", y = "BIO12: Annual Precip (mm)") +
+  theme_minimal(base_size = 10)
+
+# CMI vs temperature (if cmi in final set)
+if ("cmi" %in% vars_after_importance) {
+  p2 <- ggplot(occ, aes(x = bio1, y = cmi, colour = region)) +
+    geom_point(alpha = 0.6, size = 1.5) +
+    scale_colour_brewer(palette = "Set1") +
+    labs(x = "BIO1: Annual Mean Temp (°C)", y = "CMI: Climatic Moisture Index") +
+    theme_minimal(base_size = 10)
+} else {
+  p2 <- ggplot() + theme_void() + labs(title = "CMI not in final set")
+}
+
+p3 <- ggplot(occ, aes(x = bio11, y = bio10, colour = region)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  scale_colour_brewer(palette = "Set1") +
+  labs(x = "BIO11: Mean Temp Coldest Qtr (°C)", y = "BIO10: Mean Temp Warmest Qtr (°C)") +
+  theme_minimal(base_size = 10)
+
+library(patchwork)
+combined <- (p1 | p2) / (p3 | plot_spacer()) +
+  plot_layout(guides = "collect") +
+  plot_annotation(title = "Climate space of H. longicornis occurrences") &
+  theme(legend.position = "bottom")
+
+combined
+
+ggsave(file.path(figures_dir, "03_climate_space_selected.png"),
+       width = 10, height = 8, dpi = 300)
+```
+
+
+## 11. Prepare final raster stack and save
+
+```{r}
+#| label: save-outputs
+
+# Final selected variable names
+final_vars <- vars_after_importance
+
+# Create the reduced raster stack (global extent)
+env_selected <- env_all[[final_vars]]
+writeRaster(env_selected, file.path(processed_v2, "env_selected_global.tif"),
+            overwrite = TRUE)
+saveRDS(env_selected, file.path(processed_v2, "env_selected_global.rds"))
+
+# Australia/NZ crop
+aus_nz_ext <- ext(110, 180, -48, -8)
+env_selected_aus_nz <- crop(env_selected, aus_nz_ext)
+writeRaster(env_selected_aus_nz, file.path(processed_v2, "env_selected_aus_nz.tif"),
+            overwrite = TRUE)
+saveRDS(env_selected_aus_nz, file.path(processed_v2, "env_selected_aus_nz.rds"))
+
+# Save occurrence data with only the selected climate variables
+occ_selected <- occ %>%
+  select(species, lon, lat, ID, region, all_of(final_vars))
+write_csv(occ_selected, file.path(processed_v2, "occurrences_selected_vars.csv"))
+saveRDS(occ_selected, file.path(processed_v2, "occurrences_selected_vars.rds"))
+
+# Save the variable selection summary
+selection_summary <- candidate_info %>%
+  mutate(
+    retained = variable %in% final_vars,
+    dropped_by = case_when(
+      variable %in% vars_excluded_vif & !retained ~ "VIF > 10",
+      variable %in% to_remove & !retained ~ "Correlation > 0.7",
+      variable %in% to_drop_importance & !retained ~ "Permutation importance < 2%",
+      !retained ~ "Other",
+      TRUE ~ NA_character_
+    )
+  )
+
+write_csv(selection_summary, file.path(processed_v2, "variable_selection_log.csv"))
+
+# Save the selected variable list as a simple text reference
+writeLines(final_vars, file.path(processed_v2, "selected_variables.txt"))
+
+sprintf("Final variable set saved: %s", paste(final_vars, collapse = ", "))
+```
+
+
+## Summary
+
+```{r}
+#| label: summary-table
+
+# Selection pipeline summary
+tibble(
+  Stage = c(
+    "All candidate variables (excluding BIO5,6,8,9,18,19)",
+    "After VIF stepwise (VIF < 10)",
+    "After correlation refinement (|r| < 0.7)",
+    "After importance filter (perm. imp. > 2%)",
+    "FINAL"
+  ),
+  n_vars = c(
+    length(candidate_vars),
+    length(vars_after_vif),
+    length(vars_after_cor),
+    length(vars_after_importance),
+    length(final_vars)
+  ),
+  variables = c(
+    paste(candidate_vars, collapse = ", "),
+    paste(vars_after_vif, collapse = ", "),
+    paste(vars_after_cor, collapse = ", "),
+    paste(vars_after_importance, collapse = ", "),
+    paste(final_vars, collapse = ", ")
+  )
+)
+```
+
+```{r}
+#| label: final-variable-table
+
+# Final variable descriptions
+candidate_info %>%
+  filter(variable %in% final_vars) %>%
+  left_join(
+    var_importance %>% select(variable, permutation_pct),
+    by = "variable"
+  ) %>%
+  left_join(
+    vif_final_df %>% rename(variable = Variables),
+    by = "variable"
+  ) %>%
+  arrange(desc(permutation_pct))
+```
+
+
+## Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

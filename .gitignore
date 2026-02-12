@@ -7,3 +7,7 @@ literature/
 outputs/
 processed_data/
 spatial_thin_log.txt
+temp/
+processed_data_2/
+results/
+results_2/

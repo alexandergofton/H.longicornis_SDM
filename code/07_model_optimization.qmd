@@ -4,18 +4,11 @@ author: "Alexander W. Gofton"
 date: today
 date-format: "D MMMM YYYY"
 format:
-  html:
-    page-layout: full
+  gfm:
     toc: true
     toc-depth: 3
-    code-fold: false
-    code-tools: true
-    embed-resources: true
-    theme:
-      light: cosmo
-      dark: darkly
-    fig-width: 12
-    fig-height: 8
+    fig-width: 10
+    fig-height: 6
 execute:
   warning: false
   message: false
@@ -139,7 +132,7 @@ cat("Model selection criterion: AICc (lowest = best)\n\n")
 #Starting ENMeval optimization
 #This may take 30-90 minutes with 614 global occurrence points
 
-# Check if ENMeval results already generated
+# Check if ENMeval results already generated - no need to run more than once!
 enmeval_results_file <- paste0(outputs_dir, "enmeval_results.rds")
 
 if (file.exists(enmeval_results_file)) {
@@ -172,7 +165,7 @@ if (file.exists(enmeval_results_file)) {
   beep(sound = 8)
 
   # Save full ENMeval object
-  saveRDS(enmeval_results, enmeval_results_file))
+  saveRDS(enmeval_results, enmeval_results_file)
 
   cat("ENMeval results saved to:", enmeval_results_file,  "\n")
 }
@@ -234,6 +227,20 @@ if (length(baseline_idx) > 0) {
   cat("  Delta AICc:", round(baseline_row$AICc - best_model_row$AICc, 2), "(lower is better)\n")
   cat("  Delta AUC:", round(best_model_row$auc.val.avg - baseline_row$auc.val.avg, 4), "\n")
 }
+
+# Extract the best model from ENMeval results
+best_model <- eval.models(enmeval_results)[[best_model_idx]]
+
+# Save the optimized model if not already saved
+saveRDS(
+  best_model,
+  paste0(
+    processed_data_dir,
+    "maxent_optimized_model.rds"
+    )
+)
+
+cat("✓ Model saved\n")
 ```
 
 ## Model Selection Plots

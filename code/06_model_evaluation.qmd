@@ -4,16 +4,9 @@ author: "Alexander W. Gofton"
 date: today
 date-format: "D MMMM YYYY"
 format:
-  html:
-    page-layout: full
+  gfm:
     toc: true
     toc-depth: 3
-    code-fold: false
-    code-tools: true
-    embed-resources: true
-    theme:
-      light: cosmo
-      dark: darkly
     fig-width: 10
     fig-height: 6
 execute:

@@ -1,0 +1,484 @@
+---
+title: "Step 2: Environmental Data — Expanded Variable Set"
+author: "Alexander W. Gofton"
+date: today
+format: gfm
+---
+
+## Overview
+
+This script assembles an expanded set of environmental variables for SDM modeling,
+going beyond the original 19 WorldClim bioclimatic variables to include
+humidity and moisture metrics that are ecologically critical for *H. longicornis*.
+
+**Data sources:**
+
+1. **WorldClim 2.1** (existing) — 19 bioclimatic variables at 2.5 arcmin
+2. **ENVIREM** — Climatic moisture index (CMI), aridity index, and PET, computed
+   from WorldClim 2.1 using the `envirem` R package (Title & Bemmels 2018)
+3. **CHELSA v2.1** — Mean annual vapor pressure deficit (VPD), downloaded at
+   30 arcsec and aggregated to 2.5 arcmin
+
+**Resolution justification:** 2.5 arcmin (~5 km at the equator) is used because
+(a) it matches the spatial precision of occurrence records after 10 km thinning,
+(b) it is the standard resolution for continental-scale *H. longicornis* SDMs
+in the literature (Raghavan et al. 2019, Namgyal et al. 2020), and
+(c) finer resolution would introduce microclimatic noise not captured by
+occurrence record precision.
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(terra)
+library(sf)
+library(geodata)
+```
+
+```{r}
+#| label: paths
+
+base_dir <- here::here()
+processed_v1 <- file.path(base_dir, "processed_data")
+processed_v2 <- file.path(base_dir, "processed_data_2")
+figures_dir  <- file.path(base_dir, "figures_2")
+temp_dir     <- file.path(base_dir, "temp")
+
+# WorldClim data lives here from the v1 pipeline
+worldclim_path <- file.path(base_dir, "data", "worldclim", "climate", "wc2.1_2.5m")
+
+terraOptions(memfrac = 0.6, tempdir = temp_dir)
+```
+
+
+## 1. Load existing WorldClim 2.1 bioclimatic variables
+
+These were downloaded in the v1 pipeline at 2.5 arcmin global extent.
+
+```{r}
+#| label: load-worldclim
+
+# Build file paths for all 19 bioclim variables
+bio_files <- paste0(worldclim_path, "/wc2.1_2.5m_bio_", 1:19, ".tif")
+
+# Check which files exist
+existing <- file.exists(bio_files)
+if (!all(existing)) {
+  warning(sprintf("Missing WorldClim files: %s", paste(bio_files[!existing], collapse = ", ")))
+}
+
+# Load as a multi-layer SpatRaster
+bioclim_all <- rast(bio_files[existing])
+
+# Rename layers to clean short names
+names(bioclim_all) <- paste0("bio", 1:sum(existing))
+
+sprintf("Loaded %d WorldClim bioclimatic layers", nlyr(bioclim_all))
+sprintf("Resolution: %.4f degrees (~%.1f km)", res(bioclim_all)[1], res(bioclim_all)[1] * 111)
+sprintf("Extent: %.1f to %.1f (lon), %.1f to %.1f (lat)",
+        ext(bioclim_all)[1], ext(bioclim_all)[2],
+        ext(bioclim_all)[3], ext(bioclim_all)[4])
+```
+
+### WorldClim unit notes
+
+WorldClim 2.1 bioclimatic variables use the following units. Temperature variables
+are stored in degrees Celsius (NOT multiplied by 10, unlike WorldClim v1.4).
+Precipitation variables are in millimetres.
+
+```{r}
+#| label: worldclim-units
+
+# Quick sanity check — BIO1 (annual mean temp) should be roughly -30 to +30 °C
+bio1_range <- global(bioclim_all[["bio1"]], range, na.rm = TRUE)
+sprintf("BIO1 range: %.1f to %.1f °C", bio1_range[1, 1], bio1_range[1, 2])
+```
+
+
+## 2. Compute ENVIREM variables from WorldClim 2.1
+
+The ENVIREM dataset (Title & Bemmels 2018) provides ecologically meaningful
+variables derived from temperature and precipitation. Pre-computed ENVIREM
+rasters are based on WorldClim v1.4, so we compute them fresh from WorldClim 2.1
+using the `envirem` R package for consistency.
+
+We need monthly temperature min/max and monthly precipitation as inputs.
+
+```{r}
+#| label: download-monthly-worldclim
+
+# Download monthly climate data if not already present
+# These are needed as inputs for ENVIREM variable calculation
+tmin_path <- file.path(base_dir, "data", "worldclim", "climate", "wc2.1_2.5m")
+tmax_path <- tmin_path
+prec_path <- tmin_path
+
+# Check if monthly files already exist (from geodata download)
+tmin_file_check <- file.path(tmin_path, "wc2.1_2.5m_tmin_01.tif")
+
+if (!file.exists(tmin_file_check)) {
+  message("Downloading monthly WorldClim data for ENVIREM computation...")
+  # geodata::worldclim_global downloads to a cache; we load from there
+  tmin_rast <- worldclim_global(var = "tmin", res = 2.5,
+                                path = file.path(base_dir, "data", "worldclim"))
+  tmax_rast <- worldclim_global(var = "tmax", res = 2.5,
+                                path = file.path(base_dir, "data", "worldclim"))
+  prec_rast <- worldclim_global(var = "prec", res = 2.5,
+                                path = file.path(base_dir, "data", "worldclim"))
+} else {
+  # Load existing monthly files
+  tmin_files <- list.files(tmin_path, pattern = "wc2.1_2.5m_tmin_\\d+\\.tif$", full.names = TRUE)
+  tmax_files <- list.files(tmax_path, pattern = "wc2.1_2.5m_tmax_\\d+\\.tif$", full.names = TRUE)
+  prec_files <- list.files(prec_path, pattern = "wc2.1_2.5m_prec_\\d+\\.tif$", full.names = TRUE)
+
+  tmin_rast <- rast(sort(tmin_files))
+  tmax_rast <- rast(sort(tmax_files))
+  prec_rast <- rast(sort(prec_files))
+}
+
+sprintf("Monthly tmin layers: %d", nlyr(tmin_rast))
+sprintf("Monthly tmax layers: %d", nlyr(tmax_rast))
+sprintf("Monthly prec layers: %d", nlyr(prec_rast))
+```
+
+```{r}
+#| label: compute-envirem
+#| message: false
+
+# Compute ENVIREM variables using the envirem R package
+# If envirem is not installed, install it first
+if (!requireNamespace("envirem", quietly = TRUE)) {
+  install.packages("envirem")
+}
+library(envirem)
+
+# envirem works with raster package objects, so we need to convert.
+# However, if it supports terra objects (newer versions), we use those directly.
+# The package expects: tmin (12 layers), tmax (12 layers), precip (12 layers)
+
+# Generate a solar radiation raster (required for PET calculation)
+# This uses the Hargreaves method based on latitude and extraterrestrial radiation
+# envirem::ETsolradRasters expects a template raster to derive latitude
+message("Computing monthly solar radiation (Hargreaves method)...")
+solrad <- ETsolradRasters(tmin_rast, tmax_rast, tempScale = 1)
+
+# Compute all ENVIREM variables
+message("Computing ENVIREM variables...")
+envirem_all <- layerCreation(
+  tmin_rast, tmax_rast, prec_rast,
+  sol674 = solrad,
+  tempScale = 1  # WorldClim 2.1 is in °C, not °C * 10
+)
+
+sprintf("Computed %d ENVIREM variables:", nlyr(envirem_all))
+names(envirem_all)
+```
+
+```{r}
+#| label: select-envirem
+
+# Extract the three ENVIREM variables we want:
+# 1. Climatic Moisture Index (CMI) — ratio of precipitation to PET
+# 2. Thornthwaite Aridity Index
+# 3. Annual PET (potential evapotranspiration)
+
+# ENVIREM variable names vary by package version — identify the right ones
+envirem_names <- names(envirem_all)
+
+# Match by partial name (case-insensitive)
+cmi_idx     <- grep("climaticMoistureIndex|cmi", envirem_names, ignore.case = TRUE)
+aridity_idx <- grep("aridityIndex|thornthwaite", envirem_names, ignore.case = TRUE)
+pet_idx     <- grep("annualPET|PETann", envirem_names, ignore.case = TRUE)
+
+# If exact matches fail, print available names for manual selection
+if (length(cmi_idx) == 0 | length(aridity_idx) == 0 | length(pet_idx) == 0) {
+  warning("Could not auto-match all ENVIREM layers. Available names:")
+  print(envirem_names)
+  message("Please adjust the variable selection indices manually.")
+}
+
+# Select and rename
+envirem_selected <- c(
+  envirem_all[[cmi_idx[1]]],
+  envirem_all[[aridity_idx[1]]],
+  envirem_all[[pet_idx[1]]]
+)
+names(envirem_selected) <- c("cmi", "aridity", "pet_annual")
+
+sprintf("Selected ENVIREM variables: %s", paste(names(envirem_selected), collapse = ", "))
+```
+
+
+## 3. Download and process CHELSA vapor pressure deficit
+
+CHELSA v2.1 provides monthly mean vapor pressure deficit (vpd) at 30 arcsec
+resolution (~1 km). We download annual mean VPD and aggregate to 2.5 arcmin
+to match our other variables.
+
+```{r}
+#| label: download-chelsa-vpd
+
+# CHELSA v2.1 VPD is available as monthly files
+# We download all 12 months and compute the annual mean
+chelsa_dir <- file.path(base_dir, "data", "chelsa")
+dir.create(chelsa_dir, showWarnings = FALSE, recursive = TRUE)
+
+# CHELSA v2.1 VPD URL pattern (1981-2010 climatologies)
+# Format: CHELSA_vpd_<month>_1981-2010_V.2.1.tif
+chelsa_base_url <- "https://os.zhdk.cloud.switch.ch/envicloud/chelsa/chelsa_V2/GLOBAL/climatologies/1981-2010/vpd/"
+
+vpd_files <- file.path(chelsa_dir, sprintf("CHELSA_vpd_%02d_1981-2010_V.2.1.tif", 1:12))
+vpd_urls  <- paste0(chelsa_base_url, sprintf("CHELSA_vpd_%02d_1981-2010_V.2.1.tif", 1:12))
+
+# Download if not already present
+for (i in 1:12) {
+  if (!file.exists(vpd_files[i])) {
+    message(sprintf("Downloading CHELSA VPD month %02d...", i))
+    tryCatch(
+      download.file(vpd_urls[i], vpd_files[i], mode = "wb", quiet = TRUE),
+      error = function(e) warning(sprintf("Failed to download month %d: %s", i, e$message))
+    )
+  }
+}
+
+# Check how many downloaded successfully
+vpd_exists <- file.exists(vpd_files)
+sprintf("CHELSA VPD files downloaded: %d/12", sum(vpd_exists))
+```
+
+```{r}
+#| label: process-chelsa-vpd
+
+if (sum(vpd_exists) == 12) {
+  # Load all monthly VPD rasters
+  vpd_monthly <- rast(vpd_files)
+
+  # CHELSA VPD is stored as Pa (Pascals) — convert to kPa for interpretability
+  # Scale factor: values are in Pa * 100 (i.e., stored as integer, divide by 100 for Pa)
+  # Then divide by 1000 for kPa
+  # Check CHELSA documentation for exact scaling — adjust if needed
+  vpd_monthly <- vpd_monthly / 100  # Pa to hPa if needed; verify with data range
+
+  # Compute annual mean VPD
+  vpd_annual <- mean(vpd_monthly)
+  names(vpd_annual) <- "vpd_annual"
+
+  # Aggregate from 30 arcsec to 2.5 arcmin (factor of 5)
+  # 2.5 arcmin / 30 arcsec = 5
+  vpd_2.5arcmin <- aggregate(vpd_annual, fact = 5, fun = "mean", na.rm = TRUE)
+
+  # Resample to match the exact grid of our WorldClim data
+  vpd_resampled <- resample(vpd_2.5arcmin, bioclim_all[[1]], method = "bilinear")
+  names(vpd_resampled) <- "vpd_annual"
+
+  sprintf("CHELSA VPD aggregated: %.4f° resolution", res(vpd_resampled)[1])
+  sprintf("VPD range (annual mean): %.2f to %.2f",
+          global(vpd_resampled, min, na.rm = TRUE)[[1]],
+          global(vpd_resampled, max, na.rm = TRUE)[[1]])
+
+} else {
+  warning("Not all CHELSA VPD files downloaded. VPD will be excluded from analysis.")
+  vpd_resampled <- NULL
+}
+```
+
+
+## 4. Resample ENVIREM to match WorldClim grid
+
+ENVIREM was computed from the same WorldClim inputs so should already be on
+the same grid, but we resample to be safe.
+
+```{r}
+#| label: resample-envirem
+
+envirem_resampled <- resample(envirem_selected, bioclim_all[[1]], method = "bilinear")
+
+# Verify alignment
+sprintf("WorldClim resolution: %.6f", res(bioclim_all)[1])
+sprintf("ENVIREM resolution:   %.6f", res(envirem_resampled)[1])
+sprintf("Grids aligned: %s", compareGeom(bioclim_all, envirem_resampled, stopOnError = FALSE))
+```
+
+
+## 5. Stack all environmental layers
+
+Combine WorldClim bioclimatic variables, ENVIREM, and CHELSA VPD into a
+single multi-layer raster.
+
+```{r}
+#| label: stack-all
+
+# Build the combined raster stack
+if (!is.null(vpd_resampled)) {
+  env_all <- c(bioclim_all, envirem_resampled, vpd_resampled)
+} else {
+  env_all <- c(bioclim_all, envirem_resampled)
+}
+
+sprintf("Combined environmental stack: %d layers", nlyr(env_all))
+names(env_all)
+```
+
+
+## 6. Extract climate values at occurrence points
+
+```{r}
+#| label: extract-climate
+
+# Load the stratified occurrence data from Step 1
+occ <- read_csv(file.path(processed_v2, "occurrences_stratified.csv"),
+                show_col_types = FALSE)
+
+# Extract climate values at each occurrence point
+occ_coords <- occ %>% select(lon, lat) %>% as.data.frame()
+climate_at_occ <- extract(env_all, occ_coords)
+
+# Combine with occurrence data
+occ_with_climate <- bind_cols(occ, climate_at_occ %>% select(-ID))
+
+# Check for NAs (points falling in ocean or outside raster extent)
+n_complete <- sum(complete.cases(occ_with_climate %>% select(starts_with("bio"), cmi, aridity, pet_annual)))
+sprintf("Records with complete climate data: %d / %d", n_complete, nrow(occ_with_climate))
+
+# Remove records with incomplete climate data
+occ_with_climate <- occ_with_climate %>%
+  filter(complete.cases(across(c(starts_with("bio"), cmi, aridity, pet_annual))))
+
+sprintf("After removing incomplete records: %d", nrow(occ_with_climate))
+```
+
+
+## 7. Quick sanity checks
+
+Verify that climate values at occurrence points fall within biologically
+plausible ranges for *H. longicornis*.
+
+```{r}
+#| label: sanity-checks
+
+# Key biological thresholds from the literature:
+# - Annual mean temp (BIO1): ~4-20°C at known locations (Heath 2016)
+# - Annual precip (BIO12): typically >600mm, often >1000mm
+# - Cold tolerance limit: BIO6 (min temp coldest month) > -15°C
+
+checks <- occ_with_climate %>%
+  summarise(
+    bio1_min  = round(min(bio1, na.rm = TRUE), 1),
+    bio1_max  = round(max(bio1, na.rm = TRUE), 1),
+    bio1_mean = round(mean(bio1, na.rm = TRUE), 1),
+    bio12_min  = round(min(bio12, na.rm = TRUE), 0),
+    bio12_max  = round(max(bio12, na.rm = TRUE), 0),
+    bio12_mean = round(mean(bio12, na.rm = TRUE), 0),
+    bio6_min   = round(min(bio6, na.rm = TRUE), 1),
+    pct_below_1000mm = round(100 * mean(bio12 < 1000, na.rm = TRUE), 1),
+    cmi_range  = sprintf("%.2f to %.2f", min(cmi, na.rm = TRUE), max(cmi, na.rm = TRUE)),
+    vpd_range  = if ("vpd_annual" %in% names(occ_with_climate))
+                   sprintf("%.1f to %.1f", min(vpd_annual, na.rm = TRUE), max(vpd_annual, na.rm = TRUE))
+                 else "N/A"
+  )
+
+# Print as a transposed table for readability
+checks_t <- checks %>%
+  pivot_longer(everything(), names_to = "Metric", values_to = "Value")
+
+checks_t
+```
+
+
+## 8. Save outputs
+
+```{r}
+#| label: save-outputs
+
+# Save the full environmental raster stack (global extent)
+writeRaster(env_all, file.path(processed_v2, "env_all_global.tif"),
+            overwrite = TRUE)
+
+# Save the Australia/NZ subset for faster loading in later steps
+aus_nz_ext <- ext(110, 180, -48, -8)
+env_aus_nz <- crop(env_all, aus_nz_ext)
+writeRaster(env_aus_nz, file.path(processed_v2, "env_all_aus_nz.tif"),
+            overwrite = TRUE)
+
+# Save occurrence data with climate values
+write_csv(occ_with_climate, file.path(processed_v2, "occurrences_with_climate.csv"))
+
+# Save as RDS for faster loading in R
+saveRDS(env_all, file.path(processed_v2, "env_all_global.rds"))
+saveRDS(occ_with_climate, file.path(processed_v2, "occurrences_with_climate.rds"))
+
+sprintf("Saved: %d-layer global stack, Aus/NZ crop, and %d occurrence records with climate",
+        nlyr(env_all), nrow(occ_with_climate))
+```
+
+## 9. Variable overview figure
+
+```{r}
+#| label: fig-variable-overview
+#| fig-cap: "Distribution of key environmental variables at H. longicornis occurrence points."
+#| fig-width: 12
+#| fig-height: 8
+
+# Select a subset of key variables to plot
+plot_vars <- c("bio1", "bio10", "bio11", "bio12", "bio15", "cmi", "pet_annual")
+if ("vpd_annual" %in% names(occ_with_climate)) plot_vars <- c(plot_vars, "vpd_annual")
+
+# Nice labels
+var_labels <- c(
+  bio1 = "BIO1: Annual Mean Temp (°C)",
+  bio10 = "BIO10: Mean Temp Warmest Qtr (°C)",
+  bio11 = "BIO11: Mean Temp Coldest Qtr (°C)",
+  bio12 = "BIO12: Annual Precipitation (mm)",
+  bio15 = "BIO15: Precipitation Seasonality",
+  cmi = "CMI: Climatic Moisture Index",
+  pet_annual = "PET: Annual Evapotranspiration",
+  vpd_annual = "VPD: Vapor Pressure Deficit"
+)
+
+occ_with_climate %>%
+  select(region, all_of(plot_vars)) %>%
+  pivot_longer(-region, names_to = "variable", values_to = "value") %>%
+  mutate(variable = factor(variable, levels = plot_vars, labels = var_labels[plot_vars])) %>%
+  ggplot(aes(x = value, fill = region)) +
+  geom_histogram(bins = 30, alpha = 0.7, position = "identity") +
+  facet_wrap(~ variable, scales = "free", ncol = 2) +
+  scale_fill_brewer(palette = "Set1", name = "Region") +
+  labs(title = "Environmental conditions at occurrence points by region",
+       x = "Value", y = "Count") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(figures_dir, "02_variable_distributions_by_region.png"),
+       width = 12, height = 8, dpi = 300)
+```
+
+
+## Summary
+
+```{r}
+#| label: summary
+
+tibble(
+  Source = c("WorldClim 2.1", "ENVIREM (computed)", "CHELSA v2.1", "TOTAL"),
+  Variables = c(
+    paste0("bio1-bio19 (", 19, ")"),
+    "cmi, aridity, pet_annual (3)",
+    ifelse(!is.null(vpd_resampled), "vpd_annual (1)", "none (download failed)"),
+    as.character(nlyr(env_all))
+  ),
+  Resolution = c("2.5 arcmin", "2.5 arcmin", "2.5 arcmin (aggregated from 30 arcsec)", "2.5 arcmin"),
+  Note = c(
+    "Existing from v1 pipeline",
+    "Freshly computed from WC 2.1 monthly data via envirem R package",
+    "Downloaded climatologies 1981-2010",
+    ""
+  )
+)
+```
+
+
+## Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

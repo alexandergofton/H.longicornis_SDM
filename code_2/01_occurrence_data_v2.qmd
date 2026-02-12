@@ -1,0 +1,318 @@
+---
+title: "Step 1: Occurrence Data — Revised"
+author: "Alexander W. Gofton"
+date: today
+format: gfm
+---
+
+## Overview
+
+This script revises the occurrence data from the original pipeline (v1) with two key changes:
+
+1. **Remove records with missing coordinates** (1 record with NA lon/lat).
+2. **Geographically stratified thinning** — cap each region at ~35% of total records to reduce the dominance of East Asian occurrences (previously 61% of all data).
+
+We start from the already-thinned v1 dataset (614 records after 10 km spatial thinning) rather than re-running the full data assembly pipeline.
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(terra)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+```
+
+## 1. Load existing thinned occurrence data
+
+The v1 pipeline produced a thinned dataset of 615 records (including 1 with NA coordinates) stored with all 19 WorldClim bioclimatic variables already extracted.
+
+```{r}
+#| label: load-data
+
+# Paths — adjust base_dir to match your local setup
+base_dir <- here::here()
+processed_v1 <- file.path(base_dir, "processed_data")
+processed_v2 <- file.path(base_dir, "processed_data_2")
+figures_dir  <- file.path(base_dir, "figures_2")
+
+# Load the v1 thinned occurrences (615 rows, 1 has NA coords)
+occ_raw <- read_csv(
+  file.path(processed_v1, "occurrences_thinned.csv"),
+  show_col_types = FALSE
+)
+
+sprintf("Loaded %d records from v1 thinned dataset", nrow(occ_raw))
+```
+
+## 2. Remove records with missing coordinates
+
+```{r}
+#| label: remove-na
+
+n_before <- nrow(occ_raw)
+
+occ_clean <- occ_raw %>%
+  filter(!is.na(lon), !is.na(lat))
+
+sprintf(
+  "Removed %d record(s) with missing coordinates: %d -> %d",
+  n_before - nrow(occ_clean), n_before, nrow(occ_clean)
+)
+```
+
+## 3. Assign geographic regions
+
+We assign each record to one of three regions based on its coordinates:
+
+- **East Asia**: China, Japan, Korea (N & S), Russia (Far East), Taiwan
+- **Oceania**: Australia, New Zealand, Pacific Islands
+- **North America**: USA
+
+Records not falling into these categories are assigned to "Other". We use a spatial join with Natural Earth country boundaries.
+
+```{r}
+#| label: assign-regions
+
+# Get world country boundaries
+world <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  select(name, iso_a3, continent, subregion, geometry)
+
+# Convert occurrences to sf points
+occ_sf <- st_as_sf(occ_clean, coords = c("lon", "lat"), crs = 4326)
+
+# Spatial join to get country for each point
+occ_with_country <- st_join(occ_sf, world, join = st_intersects)
+
+# Define region mapping based on country/subregion
+east_asia_countries <- c(
+  "China", "Japan", "South Korea", "North Korea",
+  "Taiwan", "Russia"    # Russian records in our data are Far East
+)
+
+oceania_countries <- c(
+  "Australia", "New Zealand", "Fiji", "Tonga",
+  "New Caledonia", "Vanuatu", "Samoa"
+)
+
+north_america_countries <- c("United States of America")
+
+occ_with_region <- occ_with_country %>%
+  mutate(
+    region = case_when(
+      name %in% east_asia_countries ~ "East_Asia",
+      name %in% oceania_countries   ~ "Oceania",
+      name %in% north_america_countries ~ "North_America",
+      TRUE ~ "Other"
+    )
+  )
+
+# Recover original lon/lat columns (lost during st_as_sf conversion)
+coords <- st_coordinates(occ_with_region)
+occ_with_region <- occ_with_region %>%
+  st_drop_geometry() %>%
+  mutate(lon = coords[, 1], lat = coords[, 2])
+
+# Regional breakdown before stratified thinning
+region_counts_before <- occ_with_region %>%
+  count(region, name = "n_records") %>%
+  mutate(pct = round(100 * n_records / sum(n_records), 1))
+
+region_counts_before
+```
+
+## 4. Handle unassigned records
+
+Some points may fall just offshore (small coordinate imprecisions) and miss the country polygons. Let's check and assign them using nearest-country logic.
+
+```{r}
+#| label: fix-unassigned
+
+n_other <- sum(occ_with_region$region == "Other")
+
+if (n_other > 0) {
+  # For unassigned points, find the nearest country
+  unassigned_idx <- which(occ_with_region$region == "Other")
+
+  unassigned_sf <- st_as_sf(
+    occ_with_region[unassigned_idx, ],
+    coords = c("lon", "lat"), crs = 4326
+  )
+
+  # Find nearest country for each unassigned point
+  nearest_idx <- st_nearest_feature(unassigned_sf, world)
+  nearest_countries <- world$name[nearest_idx]
+
+  # Re-assign regions
+  occ_with_region$name[unassigned_idx] <- nearest_countries
+  occ_with_region$region[unassigned_idx] <- case_when(
+    nearest_countries %in% east_asia_countries ~ "East_Asia",
+    nearest_countries %in% oceania_countries   ~ "Oceania",
+    nearest_countries %in% north_america_countries ~ "North_America",
+    TRUE ~ "Other"
+  )
+
+  sprintf("Re-assigned %d offshore/unmatched points using nearest-country", n_other)
+} else {
+  "All points matched to a country polygon — no re-assignment needed"
+}
+```
+
+## 5. Geographically stratified thinning
+
+Cap each region so no single region exceeds ~35% of total records. Regions already below the cap are left untouched; only over-represented regions are subsampled.
+
+```{r}
+#| label: stratified-thinning
+
+set.seed(42)  # Reproducibility
+
+total_records <- nrow(occ_with_region)
+cap_pct <- 0.35
+cap_n <- floor(total_records * cap_pct)
+
+# Split by region, subsample those over the cap
+occ_stratified <- occ_with_region %>%
+  group_by(region) %>%
+  group_modify(~ {
+    if (nrow(.x) > cap_n) {
+      slice_sample(.x, n = cap_n)
+    } else {
+      .x
+    }
+  }) %>%
+  ungroup()
+
+# Regional breakdown after stratified thinning
+region_counts_after <- occ_stratified %>%
+  count(region, name = "n_records") %>%
+  mutate(pct = round(100 * n_records / sum(n_records), 1))
+
+# Combined before/after comparison
+region_comparison <- region_counts_before %>%
+  rename(before_n = n_records, before_pct = pct) %>%
+  left_join(
+    region_counts_after %>% rename(after_n = n_records, after_pct = pct),
+    by = "region"
+  )
+
+region_comparison
+```
+
+```{r}
+#| label: thinning-summary
+
+sprintf(
+  "Stratified thinning: %d -> %d records (cap = %d per region, %.0f%%)",
+  total_records, nrow(occ_stratified), cap_n, cap_pct * 100
+)
+```
+
+
+## 6. Visualise the stratified dataset
+
+```{r}
+#| label: fig-stratified-map
+#| fig-cap: "Occurrence records after geographically stratified thinning, coloured by region."
+#| fig-width: 10
+#| fig-height: 6
+
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+ggplot() +
+  geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_point(
+    data = occ_stratified,
+    aes(x = lon, y = lat, colour = region),
+    size = 1.5, alpha = 0.7
+  ) +
+  scale_colour_brewer(palette = "Set1", name = "Region") +
+  coord_sf(xlim = c(90, 185), ylim = c(-50, 55)) +
+  labs(
+    title = "H. longicornis occurrences after stratified thinning",
+    subtitle = sprintf("n = %d (capped at %d per region)", nrow(occ_stratified), cap_n),
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(figures_dir, "01_stratified_occurrences_map.png"),
+       width = 10, height = 6, dpi = 300)
+```
+
+```{r}
+#| label: fig-region-bars
+#| fig-cap: "Regional composition before and after stratified thinning."
+#| fig-width: 8
+#| fig-height: 4
+
+region_comparison_long <- region_comparison %>%
+  pivot_longer(
+    cols = c(before_n, after_n),
+    names_to = "stage",
+    values_to = "n"
+  ) %>%
+  mutate(stage = ifelse(stage == "before_n", "Before thinning", "After thinning"))
+
+ggplot(region_comparison_long, aes(x = region, y = n, fill = stage)) +
+  geom_col(position = "dodge", width = 0.6) +
+  geom_hline(yintercept = cap_n, linetype = "dashed", colour = "red", linewidth = 0.5) +
+  annotate("text", x = 0.5, y = cap_n + 10, label = paste0("35% cap = ", cap_n),
+           hjust = 0, colour = "red", size = 3.5) +
+  scale_fill_manual(values = c("Before thinning" = "grey60", "After thinning" = "steelblue")) +
+  labs(
+    title = "Regional record counts before and after stratified thinning",
+    x = "Region", y = "Number of records", fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+ggsave(file.path(figures_dir, "01_region_comparison_bars.png"),
+       width = 8, height = 4, dpi = 300)
+```
+
+
+## 7. Save outputs
+
+```{r}
+#| label: save-outputs
+
+# Save the stratified occurrence data (with region assignments)
+# Keep species, lon, lat, ID, region — drop the old climate columns
+# (climate values will be re-extracted in Step 2 with the expanded variable set)
+occ_output <- occ_stratified %>%
+  select(species, lon, lat, ID, region)
+
+write_csv(occ_output, file.path(processed_v2, "occurrences_stratified.csv"))
+
+# Also save as an sf geopackage for spatial operations in later steps
+occ_output_sf <- st_as_sf(occ_output, coords = c("lon", "lat"), crs = 4326)
+st_write(occ_output_sf, file.path(processed_v2, "occurrences_stratified.gpkg"),
+         delete_dsn = TRUE, quiet = TRUE)
+
+sprintf("Saved %d records to processed_data_2/occurrences_stratified.csv", nrow(occ_output))
+```
+
+
+## Summary
+
+```{r}
+#| label: summary-table
+
+tibble(
+  Step = c(
+    "v1 thinned dataset",
+    "After removing NA coordinates",
+    "After stratified thinning (35% cap)"
+  ),
+  Records = c(nrow(occ_raw), nrow(occ_clean), nrow(occ_stratified))
+)
+```
+
+
+## Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

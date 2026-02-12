@@ -1,0 +1,721 @@
+---
+title: "Step 10: Future Climate Projections"
+author: "Species Distribution Modeling Pipeline"
+date: "`r Sys.Date()`"
+format:
+  gfm:
+    toc: true
+    toc-depth: 3
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+
+## Overview
+
+This script projects the optimized MaxEnt model to future climate scenarios and analyzes habitat suitability changes.
+
+**What This Script Does**:
+1. Loads the optimized MaxEnt model (from Step 7)
+2. Projects to all 12 future climate scenarios (from Step 9)
+3. Creates ensemble predictions (mean and SD across GCMs)
+4. Calculates habitat suitability change (future - current)
+5. Identifies areas of gain, loss, and stability
+6. Quantifies suitable habitat area by scenario
+
+**Scenarios**: 12 total combinations
+- 3 GCMs: MIROC6, MPI-ESM1-2-HR, UKESM1-0-LL
+- 2 SSPs: SSP2-4.5 (moderate), SSP5-8.5 (high emissions)
+- 2 time periods: 2041-2060 (mid-century), 2081-2100 (end-century)
+
+**Expected Runtime**: 15-30 minutes
+
+---
+
+## Setup
+
+```{r setup}
+#| message: false
+#| warning: false
+
+# Set options
+options(java.parameters = "-Xmx12g")
+terra::terraOptions(memfrac = 0.8, tempdir = "temp")
+
+# Core packages
+library(terra)
+library(tidyverse)
+library(predicts)
+library(sf)
+
+# Visualization
+library(ggplot2)
+library(patchwork)
+library(viridis)
+library(tidyterra)
+
+processed_data_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/processed_data/"
+
+# Create directories
+#dir.create("outputs/future_projections", showWarnings = FALSE, recursive = TRUE)
+#dir.create("figures", showWarnings = FALSE)
+```
+
+---
+
+## Load Current Climate and Model
+
+```{r load-model}
+# Loading Model and Current Climate
+
+# Load optimized MaxEnt model
+maxent_model <- readRDS(paste0(processed_data_dir, "maxent_optimized_model.rds"))
+
+# Load current climate prediction for comparison
+current_prediction <- rast(paste0(processed_data_dir, "maxent_optimized_prediction_aus.tif"))
+
+cat("✓ Optimized MaxEnt model loaded\n")
+cat("✓ Current prediction loaded\n")
+cat(sprintf("  Extent: xmin=%.2f, xmax=%.2f, ymin=%.2f, ymax=%.2f\n",
+            ext(current_prediction)[1], ext(current_prediction)[2],
+            ext(current_prediction)[3], ext(current_prediction)[4]))
+cat(sprintf("  Resolution: %.4f°\n", res(current_prediction)[1]))
+```
+
+---
+
+## Project to Future Scenarios
+
+Loop through all 12 future climate scenarios and generate predictions:
+
+```{r project-future}
+# Projecting to Future Scenarios
+
+# Configuration
+gcms <- c("MIROC6", "MPI-ESM1-2-HR", "UKESM1-0-LL")
+ssps <- c("245", "585")
+periods <- c("2041-2060", "2081-2100")
+
+# Create output directory
+#dir.create("processed_data/future_projections", showWarnings = FALSE, recursive = TRUE)
+
+# Initialize tracking
+projection_log <- tibble(
+  gcm = character(),
+  ssp = character(),
+  period = character(),
+  status = character(),
+  mean_suitability = numeric(),
+  suitable_area_km2 = numeric(),
+  processing_time_sec = numeric()
+)
+
+# Total scenarios
+total_scenarios <- length(gcms) * length(ssps) * length(periods)
+current_scenario <- 0
+
+# Storage for all predictions
+all_predictions <- list()
+
+# Projection loop
+for (gcm in gcms) {
+  for (ssp in ssps) {
+    for (period in periods) {
+      current_scenario <- current_scenario + 1
+
+      scenario_name <- sprintf("%s_ssp%s_%s",
+                               tolower(gsub("-", "_", gcm)),
+                               ssp,
+                               gsub("-", "_", period))
+
+cat(sprintf("[%d/%d] Projecting: %s, SSP%s, %s\n",
+                  current_scenario, total_scenarios, gcm, ssp, period))
+
+      start_time <- Sys.time()
+
+      tryCatch({
+        # Load future climate data
+        future_climate_file <- sprintf(
+          paste0(
+            processed_data_dir,
+            "future_climate/future_bioclim_%s.tif"),
+          scenario_name
+        )
+
+        if (!file.exists(future_climate_file)) {
+          stop(sprintf("Future climate file not found: %s", future_climate_file))
+        }
+
+        future_climate <- rast(future_climate_file)
+
+        # Predict with MaxEnt model
+        future_prediction <- predict(
+          maxent_model,
+          future_climate,
+          args = c('outputformat=logistic')
+        )
+
+        # Calculate statistics
+        mean_suit <- global(future_prediction, "mean", na.rm = TRUE)[1,1]
+
+        # Calculate suitable area (threshold = 0.5)
+        suitable_cells <- sum(values(future_prediction > 0.5), na.rm = TRUE)
+        cell_area_km2 <- prod(res(future_prediction)) * 111 * 111  # Approx km²
+        suitable_area <- suitable_cells * cell_area_km2
+
+        # Save individual prediction
+        output_file <- sprintf(
+          paste0(processed_data_dir, "future_projections/%s_prediction.tif"),
+          scenario_name
+        )
+        writeRaster(future_prediction, output_file, overwrite = TRUE)
+
+        # Store in list for ensemble calculation
+        all_predictions[[scenario_name]] <- future_prediction
+
+        end_time <- Sys.time()
+        elapsed_sec <- as.numeric(difftime(end_time, start_time, units = "secs"))
+
+        cat(sprintf("  ✓ Mean suitability: %.4f\n", mean_suit))
+        cat(sprintf("  ✓ Suitable area: %s km²\n", scales::comma(suitable_area, accuracy = 1)))
+        cat(sprintf("  ✓ Saved: %s (%.1f sec)\n", basename(output_file), elapsed_sec))
+
+        # Log success
+        projection_log <- projection_log %>%
+          add_row(
+            gcm = gcm,
+            ssp = paste0("SSP", ssp),
+            period = period,
+            status = "success",
+            mean_suitability = mean_suit,
+            suitable_area_km2 = suitable_area,
+            processing_time_sec = elapsed_sec
+          )
+
+      }, error = function(e) {
+        cat(sprintf("  ✗ ERROR: %s\n", e$message))
+
+        # Log failure
+        projection_log <- projection_log %>%
+          add_row(
+            gcm = gcm,
+            ssp = paste0("SSP", ssp),
+            period = period,
+            status = "failed",
+            mean_suitability = NA_real_,
+            suitable_area_km2 = NA_real_,
+            processing_time_sec = 0
+          )
+      })
+    }
+  }
+}
+
+# Save projection log
+write_csv(projection_log, paste0(processed_data_dir, "future_projections/projection_log.csv"))
+
+cat("\n=== Projection Summary ===\n")
+cat(sprintf("Total scenarios: %d\n", total_scenarios))
+cat(sprintf("Successful: %d\n", sum(projection_log$status == "success")))
+cat(sprintf("Failed: %d\n", sum(projection_log$status == "failed")))
+
+if (sum(projection_log$status == "failed") > 0) {
+  cat("\n⚠ Failed scenarios:\n")
+  print(projection_log %>% filter(status == "failed") %>%
+          select(gcm, ssp, period))
+}
+```
+
+---
+
+## Create Ensemble Predictions
+
+Calculate ensemble means and standard deviations across GCMs for each SSP × period combination:
+
+```{r ensemble}
+# Creating Ensemble Predictions
+
+# Get unique SSP × period combinations
+ssp_period_combos <- expand.grid(
+  ssp = ssps,
+  period = periods,
+  stringsAsFactors = FALSE
+)
+
+ensemble_stats <- tibble(
+  ssp = character(),
+  period = character(),
+  mean_suitability = numeric(),
+  sd_suitability = numeric(),
+  suitable_area_km2 = numeric()
+)
+
+for (i in 1:nrow(ssp_period_combos)) {
+  ssp <- ssp_period_combos$ssp[i]
+  period <- ssp_period_combos$period[i]
+
+  cat(sprintf("Creating ensemble for SSP%s, %s\n", ssp, period))
+
+  # Get all predictions for this SSP × period
+  scenario_pattern <- sprintf("ssp%s_%s", ssp, gsub("-", "_", period))
+  matching_scenarios <- names(all_predictions)[grepl(scenario_pattern, names(all_predictions))]
+
+  if (length(matching_scenarios) == 0) {
+    cat("  ⚠ No predictions found for this combination\n")
+    next
+  }
+
+  # Stack predictions for this SSP × period
+  scenario_stack <- rast(lapply(matching_scenarios, function(s) all_predictions[[s]]))
+
+  # Calculate ensemble mean and SD
+  ensemble_mean <- mean(scenario_stack, na.rm = TRUE)
+  ensemble_sd <- stdev(scenario_stack, na.rm = TRUE)
+
+  # Save ensemble predictions
+  ensemble_name <- sprintf("ensemble_ssp%s_%s", ssp, gsub("-", "_", period))
+
+  writeRaster(
+    ensemble_mean,
+    sprintf(paste0(processed_data_dir, "future_projections/%s_mean.tif"), ensemble_name),
+    overwrite = TRUE
+  )
+
+  writeRaster(
+    ensemble_sd,
+    sprintf(paste0(processed_data_dir, "future_projections/%s_sd.tif"), ensemble_name),
+    overwrite = TRUE
+  )
+
+  # Calculate statistics
+  mean_suit <- global(ensemble_mean, "mean", na.rm = TRUE)[1,1]
+  sd_suit <- global(ensemble_sd, "mean", na.rm = TRUE)[1,1]
+  suitable_cells <- sum(values(ensemble_mean > 0.5), na.rm = TRUE)
+  cell_area_km2 <- prod(res(ensemble_mean)) * 111 * 111
+  suitable_area <- suitable_cells * cell_area_km2
+
+  cat(sprintf("  ✓ Mean suitability: %.4f (SD: %.4f)\n", mean_suit, sd_suit))
+  cat(sprintf("  ✓ Suitable area: %s km²\n", scales::comma(suitable_area, accuracy = 1)))
+
+  ensemble_stats <- ensemble_stats %>%
+    add_row(
+      ssp = paste0("SSP", ssp),
+      period = period,
+      mean_suitability = mean_suit,
+      sd_suitability = sd_suit,
+      suitable_area_km2 = suitable_area
+    )
+}
+
+write_csv(ensemble_stats, paste0(processed_data_dir, "future_projections/ensemble_statistics.csv"))
+```
+
+---
+
+## Calculate Change from Current
+
+For each ensemble prediction, calculate change in habitat suitability:
+
+```{r calculate-change}
+# Calculating Habitat Suitability Change
+
+change_stats <- tibble(
+  ssp = character(),
+  period = character(),
+  mean_change = numeric(),
+  area_gain_km2 = numeric(),
+  area_loss_km2 = numeric(),
+  area_stable_km2 = numeric()
+)
+
+# Cell area
+cell_area_km2 <- prod(res(current_prediction)) * 111 * 111
+
+for (i in 1:nrow(ssp_period_combos)) {
+  ssp <- ssp_period_combos$ssp[i]
+  period <- ssp_period_combos$period[i]
+
+  ensemble_name <- sprintf("ensemble_ssp%s_%s", ssp, gsub("-", "_", period))
+  ensemble_file <- sprintf(paste0(processed_data_dir, "future_projections/%s_mean.tif"), ensemble_name)
+
+  if (!file.exists(ensemble_file)) {
+    cat(sprintf("Skipping SSP%s %s (ensemble not found)\n", ssp, period))
+    next
+  }
+
+  cat(sprintf("Calculating change for SSP%s, %s\n", ssp, period))
+
+  # Load ensemble prediction
+  future_ensemble <- rast(ensemble_file)
+
+  # Ensure extents match by cropping and resampling to current_prediction
+  future_ensemble <- crop(future_ensemble, current_prediction)
+  future_ensemble <- resample(future_ensemble, current_prediction, method = "bilinear")
+
+  # Calculate change (future - current)
+  change_raster <- future_ensemble - current_prediction
+
+  # Save change raster
+  writeRaster(
+    change_raster,
+    sprintf(paste0(processed_data_dir, "future_projections/change_ssp%s_%s.tif"),
+            ssp, gsub("-", "_", period)),
+    overwrite = TRUE
+  )
+
+  # Calculate statistics
+  mean_change <- global(change_raster, "mean", na.rm = TRUE)[1,1]
+
+  # Classify change (using 0.5 threshold for suitable habitat)
+  current_suitable <- current_prediction > 0.5
+  future_suitable <- future_ensemble > 0.5
+
+  # Gain: not suitable → suitable
+  gain <- (!current_suitable) & future_suitable
+  area_gain <- sum(values(gain), na.rm = TRUE) * cell_area_km2
+
+  # Loss: suitable → not suitable
+  loss <- current_suitable & (!future_suitable)
+  area_loss <- sum(values(loss), na.rm = TRUE) * cell_area_km2
+
+  # Stable: suitable → suitable
+  stable <- current_suitable & future_suitable
+  area_stable <- sum(values(stable), na.rm = TRUE) * cell_area_km2
+
+  cat(sprintf("  Mean change: %+.4f\n", mean_change))
+  cat(sprintf("  Area gain: %s km²\n", scales::comma(area_gain, accuracy = 1)))
+  cat(sprintf("  Area loss: %s km²\n", scales::comma(area_loss, accuracy = 1)))
+  cat(sprintf("  Area stable: %s km²\n", scales::comma(area_stable, accuracy = 1)))
+
+  change_stats <- change_stats %>%
+    add_row(
+      ssp = paste0("SSP", ssp),
+      period = period,
+      mean_change = mean_change,
+      area_gain_km2 = area_gain,
+      area_loss_km2 = area_loss,
+      area_stable_km2 = area_stable
+    )
+}
+
+write_csv(change_stats, paste0(processed_data_dir, "future_projections/change_statistics.csv"))
+```
+
+---
+
+## Summary Table: Suitable Habitat Area
+
+```{r summary-table}
+cat("\n=== Suitable Habitat Area by Scenario ===\n\n")
+
+# Add current prediction to summary
+current_suitable_cells <- sum(values(current_prediction > 0.5), na.rm = TRUE)
+current_area <- current_suitable_cells * cell_area_km2
+
+# Combine current and future
+area_summary <- tibble(
+  scenario = "Current (baseline)",
+  ssp = "Current",
+  period = "2000-2020",
+  suitable_area_km2 = current_area,
+  change_from_current_km2 = 0,
+  change_from_current_pct = 0
+) %>%
+  bind_rows(
+    ensemble_stats %>%
+      mutate(
+        scenario = paste(ssp, period),
+        change_from_current_km2 = suitable_area_km2 - current_area,
+        change_from_current_pct = (suitable_area_km2 - current_area) / current_area * 100
+      ) %>%
+      select(scenario, ssp, period, suitable_area_km2,
+             change_from_current_km2, change_from_current_pct)
+  )
+
+# Print table
+print(area_summary, n = 20)
+
+# Save
+write_csv(
+  area_summary,
+  paste0(
+    processed_data_dir,
+    "future_projections/suitable_area_summary.csv"
+    )
+  )
+```
+
+---
+
+## Visualization: Ensemble Predictions
+
+Create multi-panel figure showing ensemble predictions for all scenarios:
+
+```{r viz-ensemble}
+# Creating Ensemble Prediction Visualizations
+
+# Define Australia/NZ extent for cropping
+aus_nz_xlim <- c(110, 180)
+aus_nz_ylim <- c(-48, -10)
+
+# Load all ensemble predictions
+ensemble_plots <- list()
+
+for (i in 1:nrow(ssp_period_combos)) {
+  ssp <- ssp_period_combos$ssp[i]
+  period <- ssp_period_combos$period[i]
+
+  ensemble_name <- sprintf("ensemble_ssp%s_%s", ssp, gsub("-", "_", period))
+  ensemble_file <- sprintf(
+    paste0(
+      processed_data_dir,
+      "future_projections/%s_mean.tif"
+      ),
+    ensemble_name
+    )
+
+  if (!file.exists(ensemble_file)) next
+
+  ensemble_pred <- rast(ensemble_file)
+
+  # Create plot with coord_sf limits
+  plot_title <- sprintf("SSP%s, %s", ssp, period)
+
+  p <- ggplot() +
+    geom_spatraster(data = ensemble_pred) +
+    scale_fill_gradientn(
+      colors = c("lightgrey", "yellow", "orange", "red", "darkred"),
+      na.value = "transparent",
+      limits = c(0, 1),
+      labels = scales::percent,
+      name = "Habitat\nSuitability"
+    ) +
+    labs(title = plot_title) +
+    coord_sf(xlim = aus_nz_xlim, ylim = aus_nz_ylim, expand = FALSE) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
+      axis.title = element_blank(),
+      panel.grid = element_line(color = "gray90", linewidth = 0.3)
+    )
+
+  ensemble_plots[[ensemble_name]] <- p
+}
+
+# Add current prediction for comparison
+p_current <- ggplot() +
+  geom_spatraster(data = current_prediction) +
+  scale_fill_gradientn(
+    colors = c("lightgrey", "yellow", "orange", "red", "darkred"),
+    na.value = "transparent",
+    limits = c(0, 1),
+    labels = scales::percent,
+    name = "Habitat\nSuitability"
+  ) +
+  labs(title = "Current (Baseline)") +
+  coord_sf(xlim = aus_nz_xlim, ylim = aus_nz_ylim, expand = FALSE) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
+    axis.title = element_blank(),
+    panel.grid = element_line(color = "gray90", linewidth = 0.3)
+  )
+
+# Combine all plots
+combined <- (p_current + ensemble_plots[[1]]) /
+            (ensemble_plots[[2]] + ensemble_plots[[3]]) /
+            (ensemble_plots[[4]] | plot_spacer())
+
+print(combined)
+
+ggsave(
+  "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/figures/10_ensemble_predictions_all_scenarios.png",
+       combined, width = 14, height = 12, dpi = 300)
+
+```
+
+---
+
+## Visualization: Change Maps
+
+Create change maps showing gain/loss/stable areas:
+
+```{r viz-change}
+cat("\n=== Creating Change Visualizations ===\n\n")
+
+change_plots <- list()
+
+for (i in 1:nrow(ssp_period_combos)) {
+  ssp <- ssp_period_combos$ssp[i]
+  period <- ssp_period_combos$period[i]
+
+  change_file <- sprintf(
+    paste0(processed_data_dir, "future_projections/change_ssp%s_%s.tif"),
+    ssp,
+    gsub("-", "_", period)
+  )
+
+  if (!file.exists(change_file)) {
+    next
+  }
+
+  change_raster <- rast(change_file)
+
+  # Create plot
+  plot_title <- sprintf("Change: SSP%s, %s", ssp, period)
+
+  p <- ggplot() +
+    geom_spatraster(data = change_raster) +
+    scale_fill_gradient2(
+      low = "darkred",
+      mid = "grey95",
+      high = "darkblue",
+      midpoint = 0,
+      na.value = "transparent",
+      limits = c(-1, 1),
+      name = "Change in\nSuitability"
+    ) +
+    labs(title = plot_title) +
+    coord_sf() +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
+      axis.title = element_blank(),
+      panel.grid = element_line(color = "gray90", linewidth = 0.3)
+    )
+
+  change_plots[[i]] <- p
+}
+
+# Combine change plots
+change_combined <- wrap_plots(change_plots, ncol = 2)
+
+print(change_combined)
+
+ggsave(
+  "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/figures/10_change_maps_all_scenarios.png",
+  change_combined,
+  width = 12,
+  height = 10,
+  dpi = 300
+)
+
+cat("✓ Change maps saved\n")
+```
+
+---
+
+## Final Summary
+
+```{r final-summary}
+cat("\n\n")
+cat("╔════════════════════════════════════════════════════════════════╗\n")
+cat("║         STEP 10: FUTURE PROJECTIONS - SUMMARY                ║\n")
+cat("╠════════════════════════════════════════════════════════════════╣\n")
+
+# Projection status
+cat("║ 1. FUTURE PROJECTIONS                                         ║\n")
+cat("╠════════════════════════════════════════════════════════════════╣\n")
+cat(sprintf(
+  "║   Scenarios projected: %d/%d                                    ║\n",
+  sum(projection_log$status == "success"),
+  total_scenarios
+))
+cat(sprintf(
+  "║   Ensemble predictions: %d (by SSP × period)                  ║\n",
+  nrow(ensemble_stats)
+))
+
+# Area changes
+cat("╠════════════════════════════════════════════════════════════════╣\n")
+cat("║ 2. SUITABLE HABITAT AREA                                      ║\n")
+cat("╠════════════════════════════════════════════════════════════════╣\n")
+cat(sprintf(
+  "║   Current baseline: %s km²                          ║\n",
+  format(current_area, big.mark = ",", scientific = FALSE)
+))
+
+for (i in 1:nrow(area_summary)) {
+  if (area_summary$scenario[i] == "Current (baseline)") {
+    next
+  }
+
+  cat(sprintf(
+    "║   %-20s %s km² (%+.1f%%)              ║\n",
+    paste0(area_summary$scenario[i], ":"),
+    format(
+      area_summary$suitable_area_km2[i],
+      big.mark = ",",
+      scientific = FALSE
+    ),
+    area_summary$change_from_current_pct[i]
+  ))
+}
+
+# Change patterns
+cat("╠════════════════════════════════════════════════════════════════╣\n")
+cat("║ 3. HABITAT CHANGE PATTERNS                                    ║\n")
+cat("╠════════════════════════════════════════════════════════════════╣\n")
+
+for (i in 1:nrow(change_stats)) {
+  cat(sprintf(
+    "║   %s %s:                                       ║\n",
+    change_stats$ssp[i],
+    change_stats$period[i]
+  ))
+  cat(sprintf(
+    "║     Gain: %s km² | Loss: %s km²               ║\n",
+    format(change_stats$area_gain_km2[i], big.mark = ",", scientific = FALSE),
+    format(change_stats$area_loss_km2[i], big.mark = ",", scientific = FALSE)
+  ))
+}
+
+cat("╠════════════════════════════════════════════════════════════════╣\n")
+cat("║ OUTPUTS GENERATED                                             ║\n")
+cat("╠════════════════════════════════════════════════════════════════╣\n")
+cat("║   • 12 individual scenario predictions                        ║\n")
+cat("║   • 4 ensemble means (by SSP × period)                        ║\n")
+cat("║   • 4 ensemble SDs (uncertainty)                              ║\n")
+cat("║   • 4 change rasters (future - current)                       ║\n")
+cat("║   • Summary tables (CSV)                                      ║\n")
+cat("║   • Visualization figures (PNG)                               ║\n")
+cat("╠════════════════════════════════════════════════════════════════╣\n")
+cat("║                                                                ║\n")
+cat("║   ✓✓✓ FUTURE PROJECTIONS COMPLETE ✓✓✓                        ║\n")
+cat("║                                                                ║\n")
+cat("║   ➜ READY TO PROCEED to Step 11 (Visualization & Results)     ║\n")
+cat("║                                                                ║\n")
+cat("╚════════════════════════════════════════════════════════════════╝\n\n")
+```
+
+---
+
+## Outputs Generated
+
+**Prediction Rasters**:
+- `processed_data/future_projections/*_prediction.tif` (12 individual scenarios)
+- `processed_data/future_projections/ensemble_*_mean.tif` (4 ensemble means)
+- `processed_data/future_projections/ensemble_*_sd.tif` (4 ensemble SDs)
+- `processed_data/future_projections/change_*.tif` (4 change rasters)
+
+**Summary Tables**:
+- `processed_data/future_projections/projection_log.csv`
+- `processed_data/future_projections/ensemble_statistics.csv`
+- `processed_data/future_projections/change_statistics.csv`
+- `processed_data/future_projections/suitable_area_summary.csv`
+
+**Figures**:
+- `figures/10_ensemble_predictions_all_scenarios.png`
+- `figures/10_change_maps_all_scenarios.png`
+
+---
+
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
+
+**END OF STEP 10**

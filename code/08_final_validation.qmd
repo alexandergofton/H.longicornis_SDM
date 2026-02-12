@@ -3,11 +3,11 @@ title: "Step 8: Final Model Validation"
 author: "Species Distribution Modeling Pipeline"
 date: "`r Sys.Date()`"
 format:
-  html:
+  gfm:
     toc: true
     toc-depth: 3
-    code-fold: false
-    embed-resources: true
+    fig-width: 10
+    fig-height: 6
 execute:
   warning: false
   message: false
@@ -49,6 +49,10 @@ library(ENMeval)      # Already have ENMeval results
 library(ggplot2)
 library(patchwork)
 library(viridis)
+
+processed_data_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/processed_data/"
+
+outputs_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/outputs/"
 ```
 
 ---
@@ -57,19 +61,19 @@ library(viridis)
 
 ```{r load-data}
 # Load optimized model
-best_model <- readRDS("outputs/maxent_optimized_model.rds")
+best_model <- readRDS(paste0(outputs_dir, "maxent_optimized_model.rds"))
 
 # Load climate data
-bioclim_selected <- rast("processed_data/bioclim_selected.rds")
+bioclim_selected <- rast(paste0(processed_data_dir, "bioclim_selected.rds"))
 
 # Load occurrence data with climate values
-occ_climate <- read_csv("processed_data/occurrences_selected_vars.csv")
+occ_climate <- read_csv(paste0(processed_data_dir, "occurrences_selected_vars.csv"))
 
 # Load background points
-background <- read_csv("processed_data/background_points.csv")
+background <- read_csv(paste0(processed_data_dir, "background_points.csv"))
 
 # Load predictions
-pred_optimized <- rast("processed_data/maxent_optimized_prediction_aus.tif")
+pred_optimized <- rast(paste0(processed_data_dir, "maxent_optimized_prediction_aus.tif"))
 
 cat("✓ Data loaded successfully\n")
 cat(sprintf("  - Occurrences: %d points\n", nrow(occ_climate)))
@@ -188,7 +192,7 @@ for (region_out in regions) {
 }
 
 # Save results
-write_csv(loro_results, "processed_data/loro_validation_results.csv")
+write_csv(loro_results, paste0(processed_data_dir, "loro_validation_results.csv"))
 
 cat("\n=== LORO Summary ===\n")
 print(loro_results)
@@ -224,8 +228,15 @@ p_loro <- loro_results %>%
     axis.text.x = element_text(angle = 45, hjust = 1)
   )
 
-ggsave("figures/08_loro_validation.png", p_loro,
-       width = 10, height = 6, dpi = 300)
+
+ggsave(
+  "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/figures/08_loro_validation.png",
+  p_loro,
+  width = 10,
+  height = 6,
+  dpi = 300
+  )
+
 
 print(p_loro)
 ```
@@ -239,7 +250,7 @@ Assess whether the model's predicted suitable environmental space aligns with oc
 ```{r niche-overlap}
 # Extract climate values at occurrences
 occ_env <- occ_climate %>%
-  select(starts_with("bio")) %>%
+  dplyr::select(starts_with("bio")) %>%
   drop_na() %>%
   as.matrix()
 
@@ -260,7 +271,7 @@ if (length(suitable_cells) > 0) {
 
   # Extract climate values at sampled locations
 # Extract climate values at sampled locations
-pred_env <- extract(bioclim_selected, sampled_coords) %>%  # Remove ID parameter
+pred_env <- terra::extract(bioclim_selected, sampled_coords) %>%  # Remove ID parameter
   drop_na() %>%
   as.matrix()
 
@@ -295,7 +306,7 @@ pred_env <- extract(bioclim_selected, sampled_coords) %>%  # Remove ID parameter
     geom_point(alpha = 0.4, size = 1.5) +
     stat_ellipse(level = 0.95, linetype = "dashed", linewidth = 1) +
     scale_color_manual(values = c("Occurrence" = "#440154",
-                                   "Predicted Suitable" = "#FDE725")) +
+                                   "Predicted Suitable" = "darkorange")) +
     labs(
       title = "Environmental Space: Occurrences vs Predicted Suitable Habitat",
       subtitle = sprintf("PC1: %.1f%% variance, PC2: %.1f%% variance",
@@ -310,7 +321,7 @@ pred_env <- extract(bioclim_selected, sampled_coords) %>%  # Remove ID parameter
       legend.position = "bottom"
     )
 
-  ggsave("figures/08_environmental_space_pca.png", p_pca,
+  ggsave("~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/figures/08_environmental_space_pca.png", p_pca,
          width = 10, height = 8, dpi = 300)
 
   print(p_pca)
@@ -345,7 +356,7 @@ pred_env <- extract(bioclim_selected, sampled_coords) %>%  # Remove ID parameter
       metric = c("Schoener_D", "Warren_I"),
       value = c(overlap$D, overlap$I)
     )
-    write_csv(overlap_metrics, "processed_data/niche_overlap_metrics.csv")
+    write_csv(overlap_metrics, paste0(processed_data_dir, "niche_overlap_metrics.csv"))
 
   }, error = function(e) {
     cat("\n⚠ Ecospat niche overlap calculation failed (not critical)\n")
@@ -388,74 +399,149 @@ cat("\n⏳ Running bootstrap iterations (this will take 30-60 minutes)...\n")
 ```
 
 ```{r bootstrap-run}
-# Set seed for reproducibility
-set.seed(42)
+# Bootstrap parameters
+n_bootstrap <- 100
+bootstrap_sample_fraction <- 0.8
 
-# Progress tracking
-pb <- txtProgressBar(min = 0, max = n_bootstrap, style = 3)
+# Define file paths
+bootstrap_mean_file <- paste0(processed_data_dir, "bootstrap_predictions_mean.tif")
+bootstrap_sd_file <- paste0(processed_data_dir, "bootstrap_predictions_sd.tif")
+bootstrap_stack_file <- paste0(processed_data_dir, "bootstrap_predictions_stack.tif")
 
-for (i in 1:n_bootstrap) {
-  # Resample occurrences with replacement
-  sample_idx <- sample(1:nrow(occ_coords),
-                       size = round(nrow(occ_coords) * bootstrap_sample_fraction),
-                       replace = TRUE)
+# Check if bootstrap results already exist
+if (file.exists(bootstrap_mean_file) &&
+    file.exists(bootstrap_sd_file) &&
+    file.exists(bootstrap_stack_file)) {
 
-  occ_sample <- occ_coords[sample_idx, ]
+  cat("\n=== Loading Existing Bootstrap Results ===\n")
+  cat("Bootstrap files found. Loading from disk...\n\n")
 
-  # Train model on bootstrap sample
-  boot_model <- MaxEnt(
-    x = bioclim_selected,
-    p = occ_sample,
-    a = bg_coords,
-    args = c(
-      'betamultiplier=0.5',  # Use optimized parameters
-      'linear=true', 'quadratic=true', 'product=true',
-      'threshold=true', 'hinge=true',
-      'threads=4'
+  # Load existing results
+  bootstrap_mean <- rast(bootstrap_mean_file)
+  bootstrap_sd <- rast(bootstrap_sd_file)
+  bootstrap_stack <- rast(bootstrap_stack_file)
+
+  cat("✓ Bootstrap results loaded successfully\n")
+  cat(sprintf("  - Stack contains %d iterations\n", nlyr(bootstrap_stack)))
+
+  cat("\n=== Bootstrap Summary Statistics ===\n")
+  cat(sprintf("Mean suitability:     %.4f (SD: %.4f)\n",
+              global(bootstrap_mean, "mean", na.rm = TRUE)[1,1],
+              global(bootstrap_mean, "sd", na.rm = TRUE)[1,1]))
+  cat(sprintf("Mean uncertainty (SD): %.4f (SD: %.4f)\n",
+              global(bootstrap_sd, "mean", na.rm = TRUE)[1,1],
+              global(bootstrap_sd, "sd", na.rm = TRUE)[1,1]))
+
+} else {
+
+  cat("\n=== Bootstrap Resampling Setup ===\n")
+  cat(sprintf("Iterations: %d\n", n_bootstrap))
+  cat(sprintf("Sample fraction: %.0f%%\n", bootstrap_sample_fraction * 100))
+  cat(sprintf("Sample size per iteration: ~%d points\n",
+              round(nrow(occ_coords) * bootstrap_sample_fraction)))
+
+  # Prepare coordinates
+  occ_coords <- occ_climate %>% select(lon, lat) %>% as.data.frame()
+  bg_coords <- background %>% select(lon, lat) %>% as.data.frame()
+
+  # Initialize storage
+  template_rast <- pred_optimized
+  bootstrap_stack <- rast(replicate(n_bootstrap, template_rast))
+  names(bootstrap_stack) <- paste0("boot_", 1:n_bootstrap)
+
+  cat("\n⏳ Running bootstrap iterations (this will take ~8 hours)...\n")
+
+  # Set seed for reproducibility
+  set.seed(42)
+
+  # Progress tracking
+  pb <- txtProgressBar(min = 0, max = n_bootstrap, style = 3)
+
+  for (i in 1:n_bootstrap) {
+    # Resample occurrences with replacement
+    sample_idx <- sample(1:nrow(occ_coords),
+                         size = round(nrow(occ_coords) * bootstrap_sample_fraction),
+                         replace = TRUE)
+
+    occ_sample <- occ_coords[sample_idx, ]
+
+    # Train model on bootstrap sample
+    boot_model <- MaxEnt(
+      x = bioclim_selected,
+      p = occ_sample,
+      a = bg_coords,
+      args = c(
+        'betamultiplier=0.5',
+        'linear=true', 'quadratic=true', 'product=true',
+        'threshold=true', 'hinge=true',
+        'threads=4'
+      )
     )
-  )
 
-  # Predict for Australia/NZ extent
-  boot_pred <- predict(boot_model, bioclim_selected,
-                       args = c('outputformat=logistic'))
+    # Predict for Australia/NZ extent
+    boot_pred <- predict(boot_model, bioclim_selected,
+                         args = c('outputformat=logistic'))
 
-  # Crop to Australia/NZ extent (match optimized prediction extent)
-  boot_pred_crop <- crop(boot_pred, pred_optimized)
+    # Crop to Australia/NZ extent
+    boot_pred_crop <- crop(boot_pred, pred_optimized)
 
-  # Store in stack
-  bootstrap_stack[[i]] <- boot_pred_crop
+    # Store in stack
+    bootstrap_stack[[i]] <- boot_pred_crop
 
-  # Update progress
-  setTxtProgressBar(pb, i)
+    # Update progress
+    setTxtProgressBar(pb, i)
 
-  # Periodic cleanup
-  if (i %% 10 == 0) {
-    gc()
+    # Periodic cleanup
+    if (i %% 10 == 0) {
+      gc()
+    }
   }
+
+  close(pb)
+  cat("\n✓ Bootstrap resampling complete\n")
+
+  # Calculate mean and SD across bootstrap iterations
+  bootstrap_mean <- mean(bootstrap_stack, na.rm = TRUE)
+  bootstrap_sd <- stdev(bootstrap_stack, na.rm = TRUE)
+
+  # Save all results
+  writeRaster(bootstrap_mean, bootstrap_mean_file, overwrite = TRUE)
+  writeRaster(bootstrap_sd, bootstrap_sd_file, overwrite = TRUE)
+  writeRaster(bootstrap_stack, bootstrap_stack_file, overwrite = TRUE)
+
+  cat("\n=== Bootstrap Summary Statistics ===\n")
+  cat(sprintf("Mean suitability:     %.4f (SD: %.4f)\n",
+              global(bootstrap_mean, "mean", na.rm = TRUE)[1,1],
+              global(bootstrap_mean, "sd", na.rm = TRUE)[1,1]))
+  cat(sprintf("Mean uncertainty (SD): %.4f (SD: %.4f)\n",
+              global(bootstrap_sd, "mean", na.rm = TRUE)[1,1],
+              global(bootstrap_sd, "sd", na.rm = TRUE)[1,1]))
+
+  cat("\n✓ All bootstrap files saved:\n")
+  cat(sprintf("  - %s\n", basename(bootstrap_mean_file)))
+  cat(sprintf("  - %s\n", basename(bootstrap_sd_file)))
+  cat(sprintf("  - %s\n", basename(bootstrap_stack_file)))
 }
+```
 
-close(pb)
-cat("\n✓ Bootstrap resampling complete\n")
+```{r}
+# Reload bootstrap stack after saving
+# At the start of the bootstrap-viz chunk, check if it exists:
+bootstrap_file <- paste0(processed_data_dir, "bootstrap_predictions_stack.tif")
 
-# Calculate mean and SD across bootstrap iterations
-bootstrap_mean <- mean(bootstrap_stack, na.rm = TRUE)
-bootstrap_sd <- stdev(bootstrap_stack, na.rm = TRUE)
+if (file.exists(bootstrap_file)) {
+  cat("Loading existing bootstrap stack...\n")
+  bootstrap_stack <- rast(bootstrap_file)
 
-# Save results
-writeRaster(bootstrap_mean,
-            "processed_data/bootstrap_predictions_mean.tif",
-            overwrite = TRUE)
-writeRaster(bootstrap_sd,
-            "processed_data/bootstrap_predictions_sd.tif",
-            overwrite = TRUE)
+  # Calculate mean and SD from loaded stack
+  bootstrap_mean <- mean(bootstrap_stack, na.rm = TRUE)
+  bootstrap_sd <- stdev(bootstrap_stack, na.rm = TRUE)
 
-cat("\n=== Bootstrap Summary Statistics ===\n")
-cat(sprintf("Mean suitability:     %.4f (SD: %.4f)\n",
-            global(bootstrap_mean, "mean", na.rm = TRUE)[1,1],
-            global(bootstrap_mean, "sd", na.rm = TRUE)[1,1]))
-cat(sprintf("Mean uncertainty (SD): %.4f (SD: %.4f)\n",
-            global(bootstrap_sd, "mean", na.rm = TRUE)[1,1],
-            global(bootstrap_sd, "sd", na.rm = TRUE)[1,1]))
+} else {
+  # Load the individual mean/sd files if they exist
+  bootstrap_mean <- rast("processed_data/bootstrap_predictions_mean.tif")
+  bootstrap_sd <- rast("processed_data/bootstrap_predictions_sd.tif")
+}
 ```
 
 ```{r bootstrap-viz}
@@ -537,7 +623,7 @@ combined <- (p1 + p2) / (p3 + p4)
 combined
 
 # Save plot
-ggsave("figures/08_bootstrap_uncertainty.png", combined,
+ggsave("~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/figures/08_bootstrap_uncertainty.png", combined,
        width = 12, height = 10, dpi = 300)
 
 # Calculate uncertainty zones
@@ -567,7 +653,7 @@ uncertainty_summary <- tibble(
   )
 )
 
-write_csv(uncertainty_summary, "processed_data/bootstrap_uncertainty_summary.csv")
+write_csv(uncertainty_summary, paste0(processed_data_dir, "bootstrap_uncertainty_summary.csv"))
 
 cat("\nBootstrap uncertainty visualization saved\n")
 ```
@@ -582,7 +668,7 @@ Validate predictions against known biological constraints across all regions.
 cat("\n=== Biological Validation ===\n\n")
 
 # Load full climate data (not just selected variables) for validation
-bioclim_full <- rast("processed_data/bioclim.rds")
+bioclim_full <- rast(paste0(processed_data_dir, "bioclim.rds"))
 
 # Check layer names
 cat("Available layers in bioclim_full:\n")
@@ -678,7 +764,7 @@ bio_validation <- tibble(
   )
 )
 
-write_csv(bio_validation, "processed_data/biological_validation_summary.csv")
+write_csv(bio_validation, paste0(processed_data_dir, "biological_validation_summary.csv"))
 
 cat("=== BIOLOGICAL VALIDATION COMPLETE ===\n")
 print(bio_validation)
@@ -782,7 +868,8 @@ validation_summary <- tibble(
 cat("\nValidation Summary Table:\n")
 print(validation_summary)
 
-write_csv(validation_summary, "processed_data/final_validation_summary.csv")
+write_csv(validation_summary, paste0(processed_data_dir, "final_validation_summary.csv"))
+
 cat("\nSummary saved to: processed_data/final_validation_summary.csv\n")
 ```
 
