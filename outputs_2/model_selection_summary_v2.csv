@@ -1,0 +1,12 @@
+parameter,value
+feature_class,LQHP
+regularization,2
+auc_train,0.9144
+auc_val,0.8359
+auc_diff,0.0785
+omission_10p,0.1132
+AICc,10711.5
+n_coefficients,77
+models_evaluated,32
+passed_omission_filter,25
+passed_auc_diff_filter,22

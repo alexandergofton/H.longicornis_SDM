@@ -207,10 +207,11 @@ results_table <- eval.results(enmeval_results) %>%
 
 sprintf("Total candidate models evaluated: %d", nrow(results_table))
 
-# Display key columns
+# Display key columns - use tibble formatting which handles NA values better
 results_table %>%
   select(fc, rm, auc.train, auc.val.avg, auc.diff,
          or.10p.avg, AICc, delta.AICc, ncoef) %>%
+  as_tibble() %>%
   print(n = 32)
 ```
 
@@ -460,7 +461,13 @@ ggsave(file.path(figures_dir, "05_variable_importance_selected.png"),
 # We'll create marginal response curves by varying one variable
 # while holding others at their mean
 
-env_values <- extract(env_M, occ_coords)
+# Create a clean dataframe with ONLY lon and lat columns for extraction
+occ_coords_for_extract <- data.frame(
+  lon = occ_coords$lon,
+  lat = occ_coords$lat
+)
+
+env_values <- extract(env_M, occ_coords_for_extract)
 
 # For each variable, create a sequence and predict
 response_data <- list()
