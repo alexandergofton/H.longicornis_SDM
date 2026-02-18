@@ -1,0 +1,563 @@
+---
+title: "Step 4: Accessible Area and Background Sampling"
+author: "Alexander W. Gofton"
+date: today
+format:
+  gfm:
+    toc: true
+    toc-depth: 3
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    results: hold
+---
+
+## Overview
+
+This script defines the species' accessible area ("M") and generates
+background points for MaxEnt modeling. Key changes from v1:
+
+- **Accessible area defined as a 1000 km buffered convex hull** around all
+  occurrence points, intersected with land polygons. This replaces the v1
+  approach of sampling background from the entire global land surface.
+- **Target-group bias correction** using Ixodidae (tick family) GBIF records
+  as a proxy for sampling effort. Background points are weighted toward
+  areas where ticks have actually been surveyed.
+- **10,000 background points** sampled within M, with bias weighting.
+
+These changes address the most critical issue identified in the v1 critique:
+global background sampling was inflating AUC and distorting variable importance.
+
+```{r}
+#| label: setup
+#| message: false
+
+library(tidyverse)
+library(terra)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(MASS)       # kde2d for bias surface
+library(geodata)
+```
+
+```{r}
+#| label: paths
+
+base_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/"
+processed_v2 <- file.path(base_dir, "processed_data_2")
+figures_dir  <- file.path(base_dir, "figures_2")
+outputs_dir  <- file.path(base_dir, "outputs_2")
+data_dir     <- file.path(base_dir, "data")
+```
+
+
+## 1. Load occurrence data and environmental rasters
+
+```{r}
+#| label: load-data
+
+# Stratified occurrence data from Step 1
+occ <- read_csv(file.path(processed_v2, "occurrences_stratified.csv"),
+                show_col_types = FALSE)
+
+# Selected environmental raster stack from Step 3
+# (only the final selected variables, global extent)
+
+env_selected <- readRDS(file.path(processed_v2, "env_selected_global.rds"))
+crs(env_selected) <- "EPSG:4326"  # Ensure consistent CRS
+sprintf("Occurrence records: %d", nrow(occ))
+sprintf("Environmental layers: %d (%s)", nlyr(env_selected),
+        paste(names(env_selected), collapse = ", "))
+
+# After loading
+for (i in 1:nlyr(env_selected)) {
+  crs(env_selected[[i]]) <- "EPSG:4326"
+}
+```
+
+
+## 2. Define the accessible area (M)
+
+Create a convex hull around all occurrence points, buffer by 1000 km,
+and intersect with global land polygons to exclude ocean.
+
+The 1000 km buffer was chosen because:
+- It captures the range of dispersal pathways (livestock trade, migratory birds)
+  within a biologically plausible distance from known populations.
+- It includes sufficient environmental variation for MaxEnt to distinguish
+  suitable from unsuitable habitat without being so large that the
+  discrimination task becomes trivially easy (as in the v1 global approach).
+
+
+```{r}
+#| label: create-accessible-area
+
+# Convert occurrence points to sf
+occ_sf <- st_as_sf(occ, coords = c("lon", "lat"), crs = 4326)
+
+# Create convex hull around all occurrence points
+# We need to combine all points into one geometry first
+occ_combined <- st_union(occ_sf)
+convex_hull <- st_convex_hull(occ_sf)
+
+# Buffer by 1000 km
+hull_projected <- st_transform(convex_hull, crs = "+proj=moll")
+buffer_1000km <- st_buffer(hull_projected, dist = 1000000)  # 1000 km in meters
+buffer_wgs84 <- st_transform(buffer_1000km, crs = 4326)
+
+# Make the buffer geometry valid before intersection
+buffer_wgs84 <- st_make_valid(buffer_wgs84)
+
+# Get global land polygons and intersect with buffer to exclude ocean
+world_land <- ne_countries(scale = "medium", returnclass = "sf") |>
+  st_union()  # Dissolve into a single polygon
+
+world_land <- st_make_valid(world_land)
+
+# Use st_intersection with prepared geometries
+accessible_area <- st_intersection(buffer_wgs84, world_land)
+
+# Calculate area of the accessible region
+area_km2 <- as.numeric(st_area(accessible_area)) / 1e6
+sprintf("Accessible area: %.0f km²", area_km2)
+```
+
+```{r}
+#| label: fig-accessible-area
+#| fig-cap: "Accessible area (M) defined as a 1000 km buffered convex hull around occurrence points, clipped to land."
+#| fig-width: 12
+#| fig-height: 6
+
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+ggplot() +
+  geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_sf(data = accessible_area, fill = "lightblue", alpha = 0.3,
+          colour = "blue", linewidth = 0.5) +
+  geom_sf(data = occ_sf, colour = "red", size = 0.8, alpha = 0.6) +
+  labs(
+    title = "Accessible area (M) for H. longicornis",
+    subtitle = sprintf("1000 km buffered convex hull — %.0f km²", area_km2)
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(file.path(figures_dir, "04_accessible_area_map.png"),
+       width = 12, height = 6, dpi = 300)
+```
+
+
+## 3. Mask environmental rasters to accessible area
+
+Crop and mask the environmental stack to the accessible area so that
+background points are only sampled from within M.
+
+```{r}
+#| label: mask-env-to-M
+
+# Convert accessible area sf to a terra SpatVector for masking
+accessible_vect <- vect(accessible_area)
+
+# Crop and mask the environmental rasters to the accessible area
+env_M <- crop(env_selected, accessible_vect)
+env_M <- mask(env_M, accessible_vect)
+
+# Check how many valid (non-NA) cells exist within M
+n_cells <- global(!is.na(env_M[[1]]), sum)[[1]]
+sprintf("Valid raster cells within accessible area: %.0f", n_cells)
+```
+
+
+## 4. Target-group bias correction
+
+Download Ixodidae (tick family) occurrence records from GBIF within the
+accessible area. These records represent "where people have looked for ticks"
+and serve as a proxy for sampling effort. We then create a kernel density
+surface from these records and use it to weight background point sampling.
+
+This ensures the model compares tick presence against what's available in
+places people have actually surveyed, rather than random landscape.
+
+```{r}
+#| label: download-ixodidae
+#| message: false
+
+ixodidae_all <- read.csv(
+  paste0(
+    data_dir,
+    "/Ixodidae_background_points/0023290-260208012135463.csv"
+  ),
+  sep = "\t"
+) |>
+  dplyr::filter(!is.na(decimalLongitude), !is.na(decimalLatitude)) |>
+  dplyr::select(lon = decimalLongitude, lat = decimalLatitude) |>
+  dplyr::distinct()
+```
+
+```{r}
+#| label: simplify-ixodidae-records
+# Simplifying Ixodidae records
+# Split the accessible area into individual polygons
+aa_parts <- st_cast(accessible_area, "POLYGON")
+
+# Step 1: Thin to ~1 point per 0.1° grid cell (~10 km)
+# This is fine because we only need a smooth KDE bias surface,
+# not exact point locations.
+ixodidae_thinned <- ixodidae_all %>%
+  mutate(
+    lon_bin = round(lon, 1),
+    lat_bin = round(lat, 1)
+  ) %>%
+  distinct(lon_bin, lat_bin, .keep_all = TRUE) %>%
+  dplyr::select(lon, lat)
+
+sprintf("After spatial thinning (0.1°): %d of %d points",
+        nrow(ixodidae_thinned), nrow(ixodidae_all))
+```
+
+```{r}
+# Step 2: Pre-filter by the union of per-polygon bounding boxes
+# (much tighter than a single global bbox)
+keep <- rep(FALSE, nrow(ixodidae_thinned))
+
+for (k in seq_len(nrow(aa_parts))) {
+  bb <- st_bbox(aa_parts[k, ])
+  in_bb <- ixodidae_thinned$lon >= bb["xmin"] &
+           ixodidae_thinned$lon <= bb["xmax"] &
+           ixodidae_thinned$lat >= bb["ymin"] &
+           ixodidae_thinned$lat <= bb["ymax"]
+  keep <- keep | in_bb
+}
+
+ixodidae_bbox <- ixodidae_thinned[keep, ]
+sprintf("After per-polygon bbox filter: %d points", nrow(ixodidae_bbox))
+```
+
+```{r}
+# Step 3: Now the precise intersection is fast
+ixodidae_sf <- st_as_sf(ixodidae_bbox, coords = c("lon", "lat"), crs = 4326)
+ixodidae_in_AA <- st_intersection(ixodidae_sf, accessible_area)
+
+coords <- st_coordinates(ixodidae_in_AA)
+ixodidae_points <- tibble(lon = coords[, 1], lat = coords[, 2])
+
+sprintf("Final Ixodidae bias points within M: %d", nrow(ixodidae_points))
+
+# Cache for future runs
+write_csv(ixodidae_points, paste0(processed_v2, "/ixodidae_points.csv"))
+```
+
+
+```{r map-to-check-background_points}
+# Create a map of Ixodidae occurrences
+ggplot() +
+  # Base map
+  geom_sf(data = world_map, fill = "grey95", color = "grey70", linewidth = 0.2) +
+  # Ixodidae points - convert regular coordinates to points
+  geom_point(data = ixodidae_points,
+             aes(x = lon, y = lat),
+             color = "darkgreen", size = 0.3, alpha = 0.3) +
+  # Add H. longicornis occurrence points for reference
+  geom_sf(data = occ_sf, color = "red", size = 1, alpha = 0.8) +
+  # Add labels and title
+  labs(
+    title = "Ixodidae occurrences within the accessible area",
+    subtitle = sprintf("%d Ixodidae records (green) and %d H. longicornis records (red)",
+                      nrow(ixodidae_points), nrow(occ_sf)),
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  # Apply minimal theme
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.2)
+  )
+```
+
+### Create bias surface from Ixodidae records
+
+```{r}
+#| label: create-bias-surface
+
+# Create a 2D kernel density estimate from Ixodidae records
+# This produces a smooth surface representing sampling effort
+# We'll rasterize this to match our environmental grid
+
+# Use the extent of the environmental raster within M
+ext_M <- ext(env_M)
+
+# Create the KDE using MASS::kde2d
+# n = number of grid points in each direction (match raster resolution roughly)
+kde_result <- kde2d(
+  x = ixodidae_points$lon,
+  y = ixodidae_points$lat,
+  n = 200,  # grid resolution for KDE
+  lims = c(ext_M[1], ext_M[2], ext_M[3], ext_M[4])
+)
+
+# Convert KDE result to a SpatRaster
+bias_rast <- rast(
+  list(
+    x = kde_result$x,
+    y = kde_result$y,
+    z = kde_result$z
+  )
+)
+crs(bias_rast) <- "EPSG:4326"
+
+# Resample to match the environmental grid exactly
+bias_resampled <- resample(bias_rast, env_M[[1]], method = "bilinear")
+
+# Mask to M (set ocean/outside-M cells to NA)
+bias_resampled <- mask(bias_resampled, env_M[[1]])
+
+# Add a small floor value so cells with zero bias density still have
+# a non-zero chance of being selected (avoids excluding entire regions)
+floor_val <- global(bias_resampled, quantile, probs = 0.01, na.rm = TRUE)[[1]]
+bias_resampled <- max(bias_resampled, floor_val)
+
+# Normalise to [0, 1] for use as sampling weights
+bias_min <- global(bias_resampled, min, na.rm = TRUE)[[1]]
+bias_max <- global(bias_resampled, max, na.rm = TRUE)[[1]]
+bias_weights <- (bias_resampled - bias_min) / (bias_max - bias_min)
+
+names(bias_weights) <- "bias_weight"
+
+sprintf("Bias surface created: %.4f to %.4f (normalised)",
+        global(bias_weights, min, na.rm = TRUE)[[1]],
+        global(bias_weights, max, na.rm = TRUE)[[1]])
+```
+
+```{r}
+#| label: fig-bias-surface
+#| fig-cap: "Sampling bias surface derived from Ixodidae GBIF records (kernel density)."
+#| fig-width: 12
+#| fig-height: 6
+
+# Convert bias surface to a data frame for ggplot
+bias_df <- as.data.frame(bias_weights, xy = TRUE) |>
+  filter(!is.na(bias_weight))
+
+ggplot() +
+  geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_raster(data = bias_df, aes(x = x, y = y, fill = bias_weight)) +
+  scale_fill_viridis_c(name = "Sampling\nbias weight", option = "inferno") +
+  geom_sf(data = occ_sf, colour = "cyan", size = 0.6, alpha = 0.7) +
+  coord_sf(xlim = c(ext_M[1], ext_M[2]), ylim = c(ext_M[3], ext_M[4])) +
+  labs(
+    title = "Sampling effort bias surface (Ixodidae GBIF records)",
+    subtitle = sprintf("Based on %d Ixodidae occurrence records within M",
+                       nrow(ixodidae_points))
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+ggsave(file.path(figures_dir, "04_bias_surface.png"),
+       width = 12, height = 6, dpi = 300)
+```
+
+
+## 5. Sample background points
+
+Generate 10,000 random background points within the accessible area,
+weighted by the bias surface so that well-surveyed areas receive
+proportionally more background points.
+
+```{r}
+#| label: sample-background
+set.seed(7990)
+
+n_bg <- 10000
+
+# --- Bias-weighted background sampling ---
+# 1. Get all valid (non-NA) cell indices and their coordinates
+valid_cells <- which(!is.na(values(env_M[[1]])))
+cell_coords <- xyFromCell(env_M, valid_cells)
+
+# 2. Extract bias weights for valid cells
+bias_vals <- values(bias_weights)[valid_cells]
+bias_vals[is.na(bias_vals) | bias_vals <= 0] <- 1e-6  # floor at near-zero
+
+# 3. Sample cell indices weighted by bias surface
+sampled_idx <- sample(
+  seq_along(valid_cells),
+  size = n_bg,
+  replace = FALSE,
+  prob = bias_vals
+)
+
+# 4. Extract environmental values at sampled cells
+sampled_cells <- valid_cells[sampled_idx]
+bg_values <- extract(env_M, sampled_cells)
+
+bg_points <- as.data.frame(cell_coords[sampled_idx, ]) |>
+  rename(lon = x, lat = y) |>
+  bind_cols(bg_values |> dplyr::select(-any_of("ID"))) |>
+  filter(complete.cases(pick(everything())))
+
+sprintf("Background points generated: %d", nrow(bg_points))
+```
+
+```{r}
+#| label: fig-background-points
+#| fig-cap: "Background points (n = 10,000) sampled within the accessible area with bias correction."
+#| fig-width: 12
+#| fig-height: 6
+
+ggplot() +
+  geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_sf(data = accessible_area, fill = NA, colour = "blue",
+          linewidth = 0.5, linetype = "dashed") +
+  geom_point(data = bg_points, aes(x = lon, y = lat),
+             colour = "grey40", size = 0.3, alpha = 0.3) +
+  geom_sf(data = occ_sf, colour = "red", size = 1, alpha = 0.7) +
+  coord_sf(xlim = c(ext_M[1], ext_M[2]), ylim = c(ext_M[3], ext_M[4])) +
+  labs(
+    title = "Occurrence and background points within accessible area",
+    subtitle = sprintf("%d presence (red) + %d background (grey) points",
+                       nrow(occ), nrow(bg_points)),
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(file.path(figures_dir, "04_occurrence_background_map.png"),
+       width = 12, height = 6, dpi = 300)
+```
+
+
+## 6. Compare background climate with global climate
+
+Verify that the restricted background captures the relevant environmental
+gradients without spanning the entire global climate space.
+
+```{r}
+#| label: fig-climate-comparison
+#| fig-cap: "Climate space comparison: presence points vs. background within M."
+#| fig-width: 10
+#| fig-height: 8
+
+# Get climate values at occurrence points
+occ_climate <- read_csv(
+  file.path(processed_v2, "occurrences_selected_vars.csv"),
+  show_col_types = FALSE
+)
+
+# bg_points already has environmental values from spatSample(..., values = TRUE)
+bg_climate <- bg_points |>
+  dplyr::select(-lon, -lat) |>
+  filter(complete.cases(pick(everything())))
+
+# Get matching variable names that exist in both datasets
+selected_vars <- intersect(names(bg_climate), names(occ_climate))
+
+# Subset occurrence climate data with the correct variables - use direct column selection
+occ_climate_sub <- occ_climate[, selected_vars, drop = FALSE]
+
+# Combine for plotting
+bg_long <- bg_climate |>
+  pivot_longer(cols = selected_vars, names_to = "variable", values_to = "value") |>
+  mutate(source = "Background (M)")
+
+occ_long <- occ_climate_sub |>
+  pivot_longer(cols = selected_vars, names_to = "variable", values_to = "value") |>
+  mutate(source = "Presence")
+
+climate_comparison <- bind_rows(bg_long, occ_long)
+
+ggplot(climate_comparison, aes(x = value, fill = source)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~variable, scales = "free", ncol = 3) +
+  scale_fill_manual(values = c("Background (M)" = "grey60", "Presence" = "red")) +
+  labs(
+    title = "Environmental space: presence vs. background within accessible area",
+    x = "Value", y = "Density", fill = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+
+
+## 7. Save outputs
+
+```{r}
+#| label: save-outputs
+
+# Save the accessible area polygon
+st_write(accessible_area,
+         file.path(processed_v2, "accessible_area_M.gpkg"),
+         delete_dsn = TRUE, quiet = TRUE)
+
+# Save the bias surface raster
+writeRaster(bias_weights,
+            file.path(processed_v2, "bias_surface.tif"),
+            overwrite = TRUE)
+
+# Save the environmental stack cropped to M
+writeRaster(env_M,
+            file.path(processed_v2, "env_selected_M.tif"),
+            overwrite = TRUE)
+saveRDS(env_M, file.path(processed_v2, "env_selected_M.rds"))
+
+# Save background points with climate values
+write_csv(bg_points, file.path(processed_v2, "background_points.csv"))
+
+# Save occurrence coordinates as a simple lon/lat dataframe
+# (needed by ENMeval in Step 5)
+occ_coords <- occ #|> select(lon, lat)
+write_csv(occ_coords, file.path(processed_v2, "occurrence_coords.csv"))
+
+# Save background coordinates
+bg_coords <- bg_points #|> dplyr::select(lon, lat)
+write_csv(bg_coords, file.path(processed_v2, "background_coords.csv"))
+
+sprintf("Saved accessible area polygon, bias surface, %d background points",
+        nrow(bg_points))
+```
+
+
+## Summary
+
+```{r}
+#| label: summary
+
+tibble(
+  Item = c(
+    "Accessible area (M)",
+    "Buffer distance",
+    "Area of M",
+    "Bias correction source",
+    "Ixodidae records for bias",
+    "Background points",
+    "Occurrence points",
+    "Environmental variables"
+  ),
+  Value = c(
+    "Convex hull + buffer, clipped to land",
+    "1000 km",
+    sprintf("%.0f km²", sum(area_km2)),  # Sum the area values
+    "Ixodidae GBIF records (target-group)",
+    as.character(nrow(ixodidae_points)),
+    as.character(nrow(bg_points)),
+    as.character(nrow(occ)),
+    paste(names(env_selected), collapse = ", ")
+  )
+)
+```
+
+
+## Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

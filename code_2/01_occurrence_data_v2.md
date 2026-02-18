@@ -1,50 +1,76 @@
----
-title: "Step 1: Occurrence Data — Revised"
-author: "Alexander W. Gofton"
-date: today
-format:
-  gfm:
-    toc: true
-    toc-depth: 3
-  html:
-    toc: true
-    toc-depth: 3
-    code-fold: false
-    theme: cosmo
-execute:
-  warning: false
-  message: false
-  cache: true
-knitr:
-  opts_chunk:
-    results: hold
----
+# Step 1: Occurrence Data — Revised
+Alexander W. Gofton
+2026-02-12
 
 ## Overview
 
-This script revises the occurrence data from the original pipeline (v1) with two key changes:
+This script revises the occurrence data from the original pipeline (v1)
+with two key changes:
 
-1. **Remove records with missing coordinates** (1 record with NA lon/lat).
-2. **Geographically stratified thinning** — cap each region at ~35% of total records to reduce the dominance of East Asian occurrences (previously 61% of all data).
+1.  **Remove records with missing coordinates** (1 record with NA
+    lon/lat).
+2.  **Geographically stratified thinning** — cap each region at ~35% of
+    total records to reduce the dominance of East Asian occurrences
+    (previously 61% of all data).
 
-We start from the already-thinned v1 dataset (614 records after 10 km spatial thinning) rather than re-running the full data assembly pipeline.
+We start from the already-thinned v1 dataset (614 records after 10 km
+spatial thinning) rather than re-running the full data assembly
+pipeline.
 
-```{r}
-#| label: setup
+``` r
 library(tidyverse)
+```
+
+    ── Attaching core tidyverse packages ──────────────────────── tidyverse 2.0.0 ──
+    ✔ dplyr     1.1.4     ✔ readr     2.1.5
+    ✔ forcats   1.0.0     ✔ stringr   1.5.1
+    ✔ ggplot2   4.0.0     ✔ tibble    3.3.0
+    ✔ lubridate 1.9.4     ✔ tidyr     1.3.1
+    ✔ purrr     1.1.0     
+    ── Conflicts ────────────────────────────────────────── tidyverse_conflicts() ──
+    ✖ dplyr::filter() masks stats::filter()
+    ✖ dplyr::lag()    masks stats::lag()
+    ℹ Use the conflicted package (<http://conflicted.r-lib.org/>) to force all conflicts to become errors
+
+``` r
 library(terra)
+```
+
+    Warning: package 'terra' was built under R version 4.4.3
+
+    terra 1.8.93
+
+    Attaching package: 'terra'
+
+    The following object is masked from 'package:tidyr':
+
+        extract
+
+``` r
 library(sf)
+```
+
+    Linking to GEOS 3.13.0, GDAL 3.8.5, PROJ 9.5.1; sf_use_s2() is TRUE
+
+``` r
 library(rnaturalearth)
 library(rnaturalearthdata)
 ```
 
+
+    Attaching package: 'rnaturalearthdata'
+
+    The following object is masked from 'package:rnaturalearth':
+
+        countries110
+
 ## 1. Load existing thinned occurrence data
 
-The v1 pipeline produced a thinned dataset of 615 records (including 1 with NA coordinates) stored with all 19 WorldClim bioclimatic variables already extracted.
+The v1 pipeline produced a thinned dataset of 615 records (including 1
+with NA coordinates) stored with all 19 WorldClim bioclimatic variables
+already extracted.
 
-```{r}
-#| label: load-data
-
+``` r
 # Paths — adjust base_dir to match your local setup
 base_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/"
 processed_v1 <- file.path(base_dir, "processed_data")
@@ -60,11 +86,11 @@ occ_raw <- read_csv(
 sprintf("Loaded %d records from v1 thinned dataset", nrow(occ_raw))
 ```
 
+    [1] "Loaded 615 records from v1 thinned dataset"
+
 ## 2. Remove records with missing coordinates
 
-```{r}
-#| label: remove-na
-
+``` r
 n_before <- nrow(occ_raw)
 
 occ_clean <- occ_raw %>%
@@ -78,6 +104,8 @@ sprintf(
 )
 ```
 
+    [1] "Removed 1 record(s) with missing coordinates: 615 -> 614"
+
 ## 3. Assign geographic regions
 
 We assign each record to one of three regions based on its coordinates:
@@ -86,11 +114,10 @@ We assign each record to one of three regions based on its coordinates:
 - **Oceania**: Australia, New Zealand, Pacific Islands
 - **North America**: USA
 
-Records not falling into these categories are assigned to "Other". We use a spatial join with Natural Earth country boundaries.
+Records not falling into these categories are assigned to “Other”. We
+use a spatial join with Natural Earth country boundaries.
 
-```{r}
-#| label: assign-regions
-
+``` r
 # Get world country boundaries
 world <- ne_countries(scale = "medium", returnclass = "sf") %>%
   select(name, iso_a3, continent, subregion, geometry)
@@ -147,13 +174,21 @@ region_counts_before <- occ_with_region %>%
 region_counts_before
 ```
 
+    # A tibble: 4 × 3
+      region        n_records   pct
+      <chr>             <int> <dbl>
+    1 East_Asia           426  69.4
+    2 North_America        48   7.8
+    3 Oceania             116  18.9
+    4 Other                24   3.9
+
 ## 4. Handle unassigned records
 
-Some points may fall just offshore (small coordinate imprecisions) and miss the country polygons. Let's check and assign them using nearest-country logic.
+Some points may fall just offshore (small coordinate imprecisions) and
+miss the country polygons. Let’s check and assign them using
+nearest-country logic.
 
-```{r}
-#| label: fix-unassigned
-
+``` r
 n_other <- sum(occ_with_region$region == "Other")
 
 if (n_other > 0) {
@@ -188,13 +223,15 @@ if (n_other > 0) {
 }
 ```
 
+    [1] "Re-assigned 24 offshore/unmatched points using nearest-country"
+
 ## 5. Geographically stratified thinning
 
-Cap each region so no single region exceeds ~35% of total records. Regions already below the cap are left untouched; only over-represented regions are subsampled.
+Cap each region so no single region exceeds ~35% of total records.
+Regions already below the cap are left untouched; only over-represented
+regions are subsampled.
 
-```{r}
-#| label: stratified-thinning
-
+``` r
 set.seed(42) # Reproducibility
 
 total_records <- nrow(occ_with_region)
@@ -231,24 +268,26 @@ region_comparison <- region_counts_before %>%
 region_comparison
 ```
 
-```{r}
-#| label: thinning-summary
+    # A tibble: 4 × 5
+      region        before_n before_pct after_n after_pct
+      <chr>            <int>      <dbl>   <int>     <dbl>
+    1 East_Asia          426       69.4     214      54.9
+    2 North_America       48        7.8      54      13.8
+    3 Oceania            116       18.9     121      31  
+    4 Other               24        3.9       1       0.3
 
+``` r
 sprintf(
   "Stratified thinning: %d -> %d records (cap = %d per region, %.0f%%)",
   total_records, nrow(occ_stratified), cap_n, cap_pct * 100
 )
 ```
 
+    [1] "Stratified thinning: 614 -> 390 records (cap = 214 per region, 35%)"
 
 ## 6. Visualise the stratified dataset
 
-```{r}
-#| label: fig-stratified-map
-#| fig-cap: "Occurrence records after geographically stratified thinning, coloured by region."
-#| fig-width: 10
-#| fig-height: 6
-
+``` r
 world_map <- ne_countries(scale = "medium", returnclass = "sf")
 
 ggplot() +
@@ -272,12 +311,16 @@ ggsave(file.path(figures_dir, "01_stratified_occurrences_map.png"),
        width = 10, height = 6, dpi = 300)
 ```
 
-```{r}
-#| label: fig-region-bars
-#| fig-cap: "Regional composition before and after stratified thinning."
-#| fig-width: 8
-#| fig-height: 4
+<div id="fig-stratified-map">
 
+![](01_occurrence_data_v2_files/figure-commonmark/fig-stratified-map-1.png)
+
+Figure 1: Occurrence records after geographically stratified thinning,
+coloured by region.
+
+</div>
+
+``` r
 region_comparison_long <- region_comparison %>%
   pivot_longer(
     cols = c(before_n, after_n),
@@ -303,12 +346,17 @@ ggsave(file.path(figures_dir, "01_region_comparison_bars.png"),
        width = 8, height = 4, dpi = 300)
 ```
 
+<div id="fig-region-bars">
+
+![](01_occurrence_data_v2_files/figure-commonmark/fig-region-bars-1.png)
+
+Figure 2: Regional composition before and after stratified thinning.
+
+</div>
 
 ## 7. Save outputs
 
-```{r}
-#| label: save-outputs
-
+``` r
 # Save the stratified occurrence data (with region assignments)
 # Keep species, lon, lat, ID, region — drop the old climate columns
 # (climate values will be re-extracted in Step 2 with the expanded variable set)
@@ -325,12 +373,11 @@ st_write(occ_output_sf, file.path(processed_v2, "occurrences_stratified.gpkg"),
 sprintf("Saved %d records to processed_data_2/occurrences_stratified.csv", nrow(occ_output))
 ```
 
+    [1] "Saved 390 records to processed_data_2/occurrences_stratified.csv"
 
 ## Summary
 
-```{r}
-#| label: summary-table
-
+``` r
 tibble(
   Step = c(
     "v1 thinned dataset",
@@ -341,10 +388,55 @@ tibble(
 )
 ```
 
+    # A tibble: 3 × 2
+      Step                                Records
+      <chr>                                 <int>
+    1 v1 thinned dataset                      615
+    2 After removing NA coordinates           614
+    3 After stratified thinning (35% cap)     390
 
 ## Session Information
 
-```{r}
-#| label: session-info
+``` r
 sessionInfo()
 ```
+
+    R version 4.4.1 (2024-06-14)
+    Platform: aarch64-apple-darwin20
+    Running under: macOS 26.2
+
+    Matrix products: default
+    BLAS:   /Library/Frameworks/R.framework/Versions/4.4-arm64/Resources/lib/libRblas.0.dylib 
+    LAPACK: /Library/Frameworks/R.framework/Versions/4.4-arm64/Resources/lib/libRlapack.dylib;  LAPACK version 3.12.0
+
+    locale:
+    [1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
+
+    time zone: Australia/Brisbane
+    tzcode source: internal
+
+    attached base packages:
+    [1] stats     graphics  grDevices utils     datasets  methods   base     
+
+    other attached packages:
+     [1] rnaturalearthdata_1.0.0 rnaturalearth_1.1.0     sf_1.0-21              
+     [4] terra_1.8-93            lubridate_1.9.4         forcats_1.0.0          
+     [7] stringr_1.5.1           dplyr_1.1.4             purrr_1.1.0            
+    [10] readr_2.1.5             tidyr_1.3.1             tibble_3.3.0           
+    [13] ggplot2_4.0.0           tidyverse_2.0.0        
+
+    loaded via a namespace (and not attached):
+     [1] gtable_0.3.6       xfun_0.53          tzdb_0.5.0         vctrs_0.6.5       
+     [5] tools_4.4.1        generics_0.1.4     parallel_4.4.1     proxy_0.4-27      
+     [9] pkgconfig_2.0.3    KernSmooth_2.23-26 RColorBrewer_1.1-3 S7_0.2.0          
+    [13] lifecycle_1.0.4    compiler_4.4.1     farver_2.1.2       textshaping_1.0.3 
+    [17] codetools_0.2-20   htmltools_0.5.8.1  class_7.3-23       yaml_2.3.10       
+    [21] pillar_1.11.0      crayon_1.5.3       classInt_0.4-11    wk_0.9.4          
+    [25] tidyselect_1.2.1   digest_0.6.37      stringi_1.8.7      labeling_0.4.3    
+    [29] fastmap_1.2.0      grid_4.4.1         archive_1.1.12.1   cli_3.6.5         
+    [33] magrittr_2.0.3     utf8_1.2.6         e1071_1.7-16       withr_3.0.2       
+    [37] scales_1.4.0       bit64_4.6.0-1      timechange_0.3.0   rmarkdown_2.29    
+    [41] bit_4.6.0          ragg_1.5.0         hms_1.1.3          evaluate_1.0.5    
+    [45] knitr_1.50         s2_1.1.9           rlang_1.1.6        Rcpp_1.1.0        
+    [49] glue_1.8.0         DBI_1.2.3          vroom_1.6.5        jsonlite_2.0.0    
+    [53] R6_2.6.1           systemfonts_1.2.3  units_0.8-7       

@@ -1,0 +1,496 @@
+---
+title: "Step 9: Future Projections"
+author: "Alexander W. Gofton"
+date: today
+format: gfm
+---
+
+## Overview
+
+Project the optimized MaxEnt model to all 20 future climate scenarios and
+compute ensemble statistics. Key improvements over v1:
+
+- **MESS masking on all projections** — novel climate regions masked
+- **Median ensemble** (not mean) as the primary statistic — robust to
+  outliers like the MIROC6 SSP2-4.5 issue from v1
+- **Range shift dynamics** — gain, loss, and stable area calculated
+  (not just net change)
+- **Per-GCM individual results** alongside ensemble statistics
+- **No dispersal constraints** — per user decision (open pastoral landscape)
+
+```{r}
+#| label: setup
+#| message: false
+
+options(java.parameters = "-Xmx8g")
+
+library(tidyverse)
+library(terra)
+library(sf)
+library(predicts)
+library(rJava)
+library(rnaturalearth)
+library(rnaturalearthdata)
+```
+
+```{r}
+#| label: paths
+
+base_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/"
+processed_v2 <- file.path(base_dir, "processed_data_2")
+figures_dir  <- file.path(base_dir, "figures_2")
+outputs_dir  <- file.path(base_dir, "outputs_2")
+future_dir   <- file.path(base_dir, "data", "future_climate")
+```
+
+
+## 1. Load model, current prediction, and scenario metadata
+
+```{r}
+#| label: load-data
+
+# Selected MaxEnt model
+selected_model <- readRDS(file.path(processed_v2, "selected_maxent_model.rds"))
+
+# Current climate rasters and prediction
+env_current <- rast(file.path(processed_v2, "env_selected_aus_nz.tif"))
+pred_current <- rast(file.path(processed_v2, "prediction_current_continuous.tif"))
+pred_binary_current <- rast(file.path(processed_v2, "prediction_current_binary.tif"))
+
+# MESS from current (for reference)
+mess_current <- rast(file.path(processed_v2, "mess_aus_nz.tif"))
+
+# Threshold
+primary_threshold <- as.numeric(readLines(
+  file.path(processed_v2, "primary_threshold.txt")
+))
+
+# Scenario metadata
+scenarios <- read_csv(file.path(processed_v2, "future_scenarios.csv"),
+                      show_col_types = FALSE)
+scenario_paths <- read_csv(file.path(processed_v2, "future_scenario_paths.csv"),
+                           show_col_types = FALSE)
+
+# Training environment (for MESS calculations)
+occ_coords <- read_csv(file.path(processed_v2, "occurrence_coords.csv"),
+                       show_col_types = FALSE)
+bg_points  <- read_csv(file.path(processed_v2, "background_points.csv"),
+                       show_col_types = FALSE)
+env_M <- readRDS(file.path(processed_v2, "env_selected_M.rds"))
+
+selected_vars <- names(env_current)
+training_env <- bind_rows(
+  extract(env_M, as.matrix(occ_coords)) %>% as_tibble(),
+  bg_points %>% select(all_of(selected_vars))
+) %>%
+  drop_na()
+
+sprintf("Scenarios to project: %d", nrow(scenario_paths))
+sprintf("Threshold (MaxSS): %.4f", primary_threshold)
+```
+
+
+## 2. Project model to all future scenarios
+
+For each scenario, generate:
+- Continuous suitability prediction
+- MESS surface
+- Binary prediction (with MESS mask)
+
+```{r}
+#| label: project-all-scenarios
+#| message: false
+
+# Store results in lists
+predictions <- list()
+mess_surfaces <- list()
+binary_preds <- list()
+
+for (i in seq_len(nrow(scenario_paths))) {
+  sid <- scenario_paths$scenario_id[i]
+  message(sprintf("[%d/%d] Projecting %s...", i, nrow(scenario_paths), sid))
+
+  # Load future climate stack
+  future_env <- rast(scenario_paths$final_file[i])
+
+  # Ensure layer names match
+  names(future_env) <- selected_vars
+
+  # Predict suitability
+  pred <- predict(future_env, selected_model, type = "cloglog")
+  names(pred) <- "suitability"
+
+  # Compute MESS relative to training environment
+  mess_future <- mess(future_env, training_env, full = FALSE)
+  names(mess_future) <- "mess"
+
+  # Binary prediction with MESS mask
+  pred_bin <- pred >= primary_threshold
+  mess_mask <- mess_future >= 0
+  pred_bin_masked <- mask(pred_bin, mess_mask, maskvalues = FALSE)
+
+  # Store
+  predictions[[sid]] <- pred
+  mess_surfaces[[sid]] <- mess_future
+  binary_preds[[sid]] <- pred_bin_masked
+
+  # Save individual rasters
+  writeRaster(pred,
+              file.path(processed_v2, paste0("pred_future_", sid, ".tif")),
+              overwrite = TRUE)
+}
+
+sprintf("Projected %d scenarios successfully", length(predictions))
+```
+
+
+## 3. Compute ensemble statistics for each SSP × period combination
+
+For each of the 4 SSP × period combinations, compute median, mean, SD,
+and range across the 5 GCMs.
+
+```{r}
+#| label: ensemble-statistics
+
+# Define the 4 scenario groups
+ssp_periods <- expand_grid(
+  ssp = c("245", "585"),
+  period = c("2041-2060", "2081-2100")
+)
+
+ensemble_results <- list()
+
+for (j in seq_len(nrow(ssp_periods))) {
+  ssp_j    <- ssp_periods$ssp[j]
+  period_j <- ssp_periods$period[j]
+  group_id <- sprintf("ssp%s_%s", ssp_j, period_j)
+
+  # Find all scenarios matching this SSP × period
+  matching <- scenario_paths %>%
+    filter(ssp == ssp_j, period == period_j)
+
+  if (nrow(matching) == 0) next
+
+  # Stack all GCM predictions for this group
+  pred_stack <- rast(lapply(matching$scenario_id, function(sid) predictions[[sid]]))
+
+  # Compute ensemble statistics
+  ens_median <- app(pred_stack, fun = "median", na.rm = TRUE)
+  ens_mean   <- app(pred_stack, fun = "mean", na.rm = TRUE)
+  ens_sd     <- app(pred_stack, fun = "sd", na.rm = TRUE)
+  ens_min    <- app(pred_stack, fun = "min", na.rm = TRUE)
+  ens_max    <- app(pred_stack, fun = "max", na.rm = TRUE)
+
+  names(ens_median) <- "median"
+  names(ens_mean)   <- "mean"
+  names(ens_sd)     <- "sd"
+  names(ens_min)    <- "min"
+  names(ens_max)    <- "max"
+
+  # Binary from median prediction
+  ens_binary <- ens_median >= primary_threshold
+
+  # Save ensemble rasters
+  ens_stack <- c(ens_median, ens_mean, ens_sd, ens_min, ens_max)
+  writeRaster(ens_stack,
+              file.path(processed_v2, paste0("ensemble_", group_id, ".tif")),
+              overwrite = TRUE)
+
+  ensemble_results[[group_id]] <- list(
+    median = ens_median,
+    mean = ens_mean,
+    sd = ens_sd,
+    binary = ens_binary,
+    n_gcms = nrow(matching)
+  )
+
+  sprintf("Ensemble %s: %d GCMs stacked", group_id, nrow(matching))
+}
+```
+
+
+## 4. Range shift dynamics — gain, loss, stable
+
+For each future scenario, classify every cell into:
+- **Stable suitable** — suitable in both current and future
+- **Gain** — unsuitable now, suitable in future
+- **Loss** — suitable now, unsuitable in future
+- **Stable unsuitable** — unsuitable in both
+
+```{r}
+#| label: range-shift-dynamics
+
+# Current binary (unmasked for shift calculations)
+current_binary <- pred_current >= primary_threshold
+
+shift_results <- list()
+
+for (group_id in names(ensemble_results)) {
+  future_binary <- ensemble_results[[group_id]]$binary
+
+  # Classify cells
+  # current = 1, future = 1 → stable suitable (value = 3)
+  # current = 0, future = 1 → gain (value = 2)
+  # current = 1, future = 0 → loss (value = 1)
+  # current = 0, future = 0 → stable unsuitable (value = 0)
+  shift_rast <- current_binary * 2 + future_binary
+  # Recode: 3 = stable suitable, 2 = loss, 1 = gain, 0 = stable unsuitable
+  # Actually: current*2 + future gives:
+  #   1*2 + 1 = 3 → stable suitable
+  #   1*2 + 0 = 2 → loss
+  #   0*2 + 1 = 1 → gain
+  #   0*2 + 0 = 0 → stable unsuitable
+
+  names(shift_rast) <- "shift_class"
+
+  # Calculate areas
+  cell_area_km2 <- prod(res(current_binary)) * 111^2 *
+    cos(mean(ext(current_binary)[3:4]) * pi / 180)
+
+  n_stable_suit  <- global(shift_rast == 3, sum, na.rm = TRUE)[[1]]
+  n_gain         <- global(shift_rast == 1, sum, na.rm = TRUE)[[1]]
+  n_loss         <- global(shift_rast == 2, sum, na.rm = TRUE)[[1]]
+  n_stable_unsuit <- global(shift_rast == 0, sum, na.rm = TRUE)[[1]]
+
+  shift_results[[group_id]] <- tibble(
+    scenario = group_id,
+    stable_suitable_km2 = n_stable_suit * cell_area_km2,
+    gain_km2 = n_gain * cell_area_km2,
+    loss_km2 = n_loss * cell_area_km2,
+    stable_unsuitable_km2 = n_stable_unsuit * cell_area_km2,
+    net_change_km2 = (n_gain - n_loss) * cell_area_km2,
+    current_suitable_km2 = (n_stable_suit + n_loss) * cell_area_km2,
+    future_suitable_km2 = (n_stable_suit + n_gain) * cell_area_km2,
+    pct_change = round(100 * (n_gain - n_loss) / (n_stable_suit + n_loss), 1)
+  )
+
+  # Save shift raster
+  writeRaster(shift_rast,
+              file.path(processed_v2, paste0("range_shift_", group_id, ".tif")),
+              overwrite = TRUE)
+}
+
+shift_table <- bind_rows(shift_results)
+shift_table
+```
+
+
+## 5. Per-GCM results
+
+```{r}
+#| label: per-gcm-results
+
+# For each individual scenario, compute suitable area and net change
+gcm_results <- list()
+
+for (i in seq_len(nrow(scenario_paths))) {
+  sid <- scenario_paths$scenario_id[i]
+
+  future_binary <- predictions[[sid]] >= primary_threshold
+  shift <- current_binary * 2 + future_binary
+
+  cell_area_km2 <- prod(res(current_binary)) * 111^2 *
+    cos(mean(ext(current_binary)[3:4]) * pi / 180)
+
+  n_gain <- global(shift == 1, sum, na.rm = TRUE)[[1]]
+  n_loss <- global(shift == 2, sum, na.rm = TRUE)[[1]]
+  n_stable <- global(shift == 3, sum, na.rm = TRUE)[[1]]
+  n_current <- n_stable + n_loss
+
+  # MESS extrapolation for this scenario
+  n_novel <- global(mess_surfaces[[sid]] < 0, sum, na.rm = TRUE)[[1]]
+  n_valid <- global(!is.na(mess_surfaces[[sid]]), sum)[[1]]
+
+  gcm_results[[sid]] <- tibble(
+    scenario_id = sid,
+    gcm = scenario_paths$gcm[i],
+    ssp = scenario_paths$ssp[i],
+    period = scenario_paths$period[i],
+    current_suitable_km2 = n_current * cell_area_km2,
+    future_suitable_km2 = (n_stable + n_gain) * cell_area_km2,
+    gain_km2 = n_gain * cell_area_km2,
+    loss_km2 = n_loss * cell_area_km2,
+    net_change_km2 = (n_gain - n_loss) * cell_area_km2,
+    pct_change = round(100 * (n_gain - n_loss) / max(n_current, 1), 1),
+    pct_extrapolation = round(100 * n_novel / max(n_valid, 1), 1)
+  )
+}
+
+gcm_table <- bind_rows(gcm_results) %>%
+  arrange(ssp, period, gcm)
+
+gcm_table
+```
+
+
+## 6. Ensemble summary with uncertainty
+
+```{r}
+#| label: ensemble-summary-with-uncertainty
+
+# Summarise per-GCM results by SSP × period
+uncertainty_summary <- gcm_table %>%
+  group_by(ssp, period) %>%
+  summarise(
+    n_gcms = n(),
+    median_net_change_km2 = median(net_change_km2),
+    mean_net_change_km2 = mean(net_change_km2),
+    sd_net_change_km2 = sd(net_change_km2),
+    min_net_change_km2 = min(net_change_km2),
+    max_net_change_km2 = max(net_change_km2),
+    median_pct_change = median(pct_change),
+    range_pct_change = sprintf("%.1f to %.1f%%", min(pct_change), max(pct_change)),
+    median_extrapolation = median(pct_extrapolation),
+    .groups = "drop"
+  )
+
+uncertainty_summary
+```
+
+
+## 7. Visualise ensemble projections
+
+```{r}
+#| label: fig-ensemble-maps
+#| fig-cap: "Ensemble median habitat suitability under four future scenarios."
+#| fig-width: 12
+#| fig-height: 10
+
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Create maps for each scenario group
+plot_list <- list()
+
+for (group_id in names(ensemble_results)) {
+  median_df <- as.data.frame(ensemble_results[[group_id]]$median, xy = TRUE) %>%
+    filter(!is.na(median))
+
+  p <- ggplot() +
+    geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+    geom_raster(data = median_df, aes(x = x, y = y, fill = median)) +
+    scale_fill_viridis_c(name = "Suitability", option = "magma", limits = c(0, 1)) +
+    coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
+    labs(title = gsub("_", " ", toupper(group_id))) +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "right")
+
+  plot_list[[group_id]] <- p
+}
+
+library(patchwork)
+wrap_plots(plot_list, ncol = 2) +
+  plot_annotation(
+    title = "Ensemble median habitat suitability — future projections",
+    subtitle = sprintf("5-GCM median | Threshold = %.3f (MaxSS)", primary_threshold)
+  )
+
+ggsave(file.path(figures_dir, "09_ensemble_suitability_maps.png"),
+       width = 12, height = 10, dpi = 300)
+```
+
+```{r}
+#| label: fig-range-shift-bars
+#| fig-cap: "Range shift dynamics (gain, loss, stable) across scenarios."
+#| fig-width: 10
+#| fig-height: 6
+
+shift_long <- shift_table %>%
+  select(scenario, stable_suitable_km2, gain_km2, loss_km2) %>%
+  pivot_longer(-scenario, names_to = "category", values_to = "area_km2") %>%
+  mutate(
+    category = case_when(
+      category == "stable_suitable_km2" ~ "Stable suitable",
+      category == "gain_km2" ~ "Gain",
+      category == "loss_km2" ~ "Loss"
+    ),
+    category = factor(category, levels = c("Gain", "Stable suitable", "Loss"))
+  )
+
+ggplot(shift_long, aes(x = scenario, y = area_km2 / 1000, fill = category)) +
+  geom_col(position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c(
+    "Gain" = "#2ca02c",
+    "Stable suitable" = "#1f77b4",
+    "Loss" = "#d62728"
+  )) +
+  labs(
+    title = "Range shift dynamics — gain, loss, and stable habitat",
+    subtitle = "Based on ensemble median predictions with MaxSS threshold",
+    x = "Scenario", y = "Area (× 1000 km²)", fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave(file.path(figures_dir, "09_range_shift_dynamics.png"),
+       width = 10, height = 6, dpi = 300)
+```
+
+```{r}
+#| label: fig-gcm-variability
+#| fig-cap: "Per-GCM net change in suitable habitat area, showing inter-model uncertainty."
+#| fig-width: 10
+#| fig-height: 6
+
+ggplot(gcm_table, aes(x = gcm, y = pct_change, fill = gcm)) +
+  geom_col(width = 0.6) +
+  facet_grid(ssp ~ period, labeller = labeller(
+    ssp = c("245" = "SSP2-4.5", "585" = "SSP5-8.5")
+  )) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  labs(
+    title = "Net change in suitable habitat by GCM and scenario",
+    subtitle = "Positive = expansion, negative = contraction",
+    x = "GCM", y = "Net change (%)", fill = "GCM"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    legend.position = "none"
+  )
+
+ggsave(file.path(figures_dir, "09_gcm_variability.png"),
+       width = 10, height = 6, dpi = 300)
+```
+
+
+## 8. Save outputs
+
+```{r}
+#| label: save-outputs
+
+# Save range shift summary tables
+write_csv(shift_table, file.path(outputs_dir, "range_shift_summary_v2.csv"))
+write_csv(gcm_table, file.path(outputs_dir, "per_gcm_results_v2.csv"))
+write_csv(uncertainty_summary, file.path(outputs_dir, "ensemble_uncertainty_v2.csv"))
+
+sprintf("Future projection outputs saved to %s", outputs_dir)
+```
+
+
+## Summary
+
+```{r}
+#| label: summary
+
+# High-level summary
+shift_table %>%
+  select(scenario, current_suitable_km2, future_suitable_km2,
+         gain_km2, loss_km2, net_change_km2, pct_change) %>%
+  mutate(across(where(is.numeric), ~ round(., 0)))
+```
+
+```{r}
+#| label: uncertainty-overview
+
+# Uncertainty overview
+uncertainty_summary %>%
+  select(ssp, period, median_pct_change, range_pct_change, median_extrapolation)
+```
+
+
+## Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

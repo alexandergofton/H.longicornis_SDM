@@ -1,0 +1,603 @@
+---
+title: "Step 10: Visualization and Results Summary"
+author: "Alexander W. Gofton"
+date: today
+format: gfm
+---
+
+## Overview
+
+Final visualization and results summary. This step produces publication-quality
+figures and tables with key improvements from v1:
+
+- **Range shift framing** — maps show gain, loss, and stable areas (not just
+  net expansion)
+- **Uncertainty prominence** — MESS extrapolation, GCM variability, and
+  validation caveats presented upfront
+- **Per-GCM results** alongside ensemble statistics
+- **Priority surveillance map** — areas with high-confidence future suitability
+  (suitable in ≥4 of 5 GCMs)
+
+```{r}
+#| label: setup
+#| message: false
+
+library(tidyverse)
+library(terra)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(patchwork)
+```
+
+```{r}
+#| label: paths
+
+base_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/"
+processed_v2 <- file.path(base_dir, "processed_data_2")
+figures_dir  <- file.path(base_dir, "figures_2")
+outputs_dir  <- file.path(base_dir, "outputs_2")
+```
+
+
+## 1. Load all results
+
+```{r}
+#| label: load-results
+
+# Current prediction
+pred_current <- rast(file.path(processed_v2, "prediction_current_continuous.tif"))
+pred_binary  <- rast(file.path(processed_v2, "prediction_current_binary.tif"))
+mess_current <- rast(file.path(processed_v2, "mess_aus_nz.tif"))
+
+# Threshold
+primary_threshold <- as.numeric(readLines(
+  file.path(processed_v2, "primary_threshold.txt")
+))
+
+# Model evaluation results
+metrics      <- read_csv(file.path(outputs_dir, "model_metrics_v2.csv"),
+                         show_col_types = FALSE)
+comparison   <- read_csv(file.path(outputs_dir, "v1_v2_comparison.csv"),
+                         show_col_types = FALSE)
+validation   <- read_csv(file.path(outputs_dir, "biological_validation_v2.csv"),
+                         show_col_types = FALSE)
+loro_results <- read_csv(file.path(outputs_dir, "loro_cv_results_v2.csv"),
+                         show_col_types = FALSE)
+niche_overlap <- read_csv(file.path(outputs_dir, "niche_overlap_v2.csv"),
+                          show_col_types = FALSE)
+
+# Future projection results
+shift_table <- read_csv(file.path(outputs_dir, "range_shift_summary_v2.csv"),
+                        show_col_types = FALSE)
+gcm_table   <- read_csv(file.path(outputs_dir, "per_gcm_results_v2.csv"),
+                         show_col_types = FALSE)
+uncertainty <- read_csv(file.path(outputs_dir, "ensemble_uncertainty_v2.csv"),
+                        show_col_types = FALSE)
+
+# Variable importance
+var_importance <- read_csv(file.path(outputs_dir, "variable_importance_v2.csv"),
+                           show_col_types = FALSE)
+
+# Occurrence data (for overlay)
+occ <- read_csv(file.path(processed_v2, "occurrences_stratified.csv"),
+                show_col_types = FALSE)
+occ_aus <- occ %>% filter(region == "Oceania")
+
+# Scenario metadata
+scenarios <- read_csv(file.path(processed_v2, "future_scenarios.csv"),
+                      show_col_types = FALSE)
+
+# World map for plotting
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+aus_nz <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  filter(iso_a3 %in% c("AUS", "NZL"))
+```
+
+
+## 2. Key caveats and uncertainty summary
+
+This section is placed first deliberately — any interpretation of the
+results below should be read in context of these limitations.
+
+```{r}
+#| label: caveats-summary
+
+# Compile all uncertainty/limitation information
+caveats <- tibble(
+  Category = c(
+    "Extrapolation (current)",
+    "GCM agreement",
+    "Biological validation — east coast",
+    "Biological validation — deserts",
+    "Niche overlap (native vs invaded)",
+    "Delta-change approximation",
+    "No dispersal constraints"
+  ),
+  Detail = c(
+    sprintf("%.1f%% of Aus/NZ cells have novel climate (MESS < 0)",
+            100 * global(mess_current < 0, sum, na.rm = TRUE)[[1]] /
+              global(!is.na(mess_current), sum)[[1]]),
+    sprintf("GCM range in net change: %s",
+            paste(uncertainty$range_pct_change, collapse = " | ")),
+    sprintf("%s — %s (v1 was 0.157 = FAIL)",
+            validation$Value[1], validation$Status[1]),
+    sprintf("%s — %s",
+            validation$Value[2], validation$Status[2]),
+    sprintf("Schoener's D = %.3f, Warren's I = %.3f",
+            niche_overlap$Value[1], niche_overlap$Value[2]),
+    "ENVIREM/CHELSA future values computed via delta-change method (not direct GCM output)",
+    "Assumes no dispersal limitation (justified: open pastoral landscape)"
+  )
+)
+
+caveats
+```
+
+
+## 3. Publication Figure 1: Current habitat suitability
+
+```{r}
+#| label: fig-pub-current
+#| fig-cap: "Figure 1. Current habitat suitability for H. longicornis in Australia and New Zealand."
+#| fig-width: 12
+#| fig-height: 10
+
+# Continuous suitability map
+pred_df <- as.data.frame(pred_current, xy = TRUE) %>%
+  filter(!is.na(suitability))
+
+mess_df <- as.data.frame(mess_current, xy = TRUE) %>%
+  filter(!is.na(mess), mess < 0)
+
+p_current <- ggplot() +
+  geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_raster(data = pred_df, aes(x = x, y = y, fill = suitability)) +
+  # Overlay MESS < 0 as semi-transparent hatching
+  geom_raster(data = mess_df, aes(x = x, y = y), fill = "grey50", alpha = 0.3) +
+  scale_fill_viridis_c(
+    name = "Habitat\nsuitability",
+    option = "magma",
+    limits = c(0, 1)
+  ) +
+  geom_point(data = occ_aus, aes(x = lon, y = lat),
+             colour = "cyan", size = 1.2, alpha = 0.8, shape = 16) +
+  coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
+  labs(
+    title = "A) Continuous habitat suitability (current climate)",
+    subtitle = "Grey shading = novel climate (MESS < 0) | Cyan = occurrence records"
+  ) +
+  theme_minimal(base_size = 11)
+
+# Binary suitability map (with MESS classes)
+binary_df <- as.data.frame(pred_binary, xy = TRUE) %>%
+  filter(!is.na(suitable))
+
+mess_mask_df <- as.data.frame(mess_current >= 0, xy = TRUE) %>%
+  filter(!is.na(mess))
+
+combined_df <- binary_df %>%
+  left_join(
+    as.data.frame(mess_current, xy = TRUE) %>% rename(mess_val = mess),
+    by = c("x", "y")
+  ) %>%
+  mutate(
+    category = case_when(
+      mess_val < 0 ~ "Novel climate",
+      suitable == 1 ~ "Suitable",
+      TRUE ~ "Unsuitable"
+    )
+  )
+
+p_binary <- ggplot() +
+  geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_raster(data = combined_df, aes(x = x, y = y, fill = category)) +
+  scale_fill_manual(
+    values = c(
+      "Suitable" = "#2166AC",
+      "Unsuitable" = "grey90",
+      "Novel climate" = "#FFD700"
+    ),
+    name = NULL
+  ) +
+  geom_point(data = occ_aus, aes(x = lon, y = lat),
+             colour = "red", size = 1, alpha = 0.8, shape = 16) +
+  coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
+  labs(
+    title = sprintf("B) Binary suitability (threshold = %.3f, MaxSS)", primary_threshold),
+    subtitle = "Red = occurrence records"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+
+p_current / p_binary
+
+ggsave(file.path(figures_dir, "10_fig1_current_suitability.png"),
+       width = 12, height = 10, dpi = 300)
+```
+
+
+## 4. Publication Figure 2: Range shift maps
+
+```{r}
+#| label: fig-pub-range-shift
+#| fig-cap: "Figure 2. Projected range shifts under four future climate scenarios (ensemble median)."
+#| fig-width: 12
+#| fig-height: 10
+
+ssp_periods <- expand_grid(
+  ssp = c("245", "585"),
+  period = c("2041-2060", "2081-2100")
+)
+
+shift_plots <- list()
+
+for (j in seq_len(nrow(ssp_periods))) {
+  group_id <- sprintf("ssp%s_%s", ssp_periods$ssp[j], ssp_periods$period[j])
+  shift_file <- file.path(processed_v2, paste0("range_shift_", group_id, ".tif"))
+
+  if (!file.exists(shift_file)) next
+
+  shift_rast <- rast(shift_file)
+  shift_df <- as.data.frame(shift_rast, xy = TRUE) %>%
+    filter(!is.na(shift_class)) %>%
+    mutate(
+      category = case_when(
+        shift_class == 3 ~ "Stable suitable",
+        shift_class == 1 ~ "Gain",
+        shift_class == 2 ~ "Loss",
+        shift_class == 0 ~ "Stable unsuitable"
+      ),
+      category = factor(category,
+                        levels = c("Gain", "Stable suitable", "Loss", "Stable unsuitable"))
+    )
+
+  # Get stats for this scenario
+  stats <- shift_table %>% filter(scenario == group_id)
+
+  nice_label <- sprintf("SSP%s %s",
+                         ssp_periods$ssp[j],
+                         ssp_periods$period[j])
+
+  p <- ggplot() +
+    geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+    geom_raster(data = shift_df %>% filter(category != "Stable unsuitable"),
+                aes(x = x, y = y, fill = category)) +
+    scale_fill_manual(
+      values = c(
+        "Gain" = "#2ca02c",
+        "Stable suitable" = "#1f77b4",
+        "Loss" = "#d62728"
+      ),
+      name = NULL,
+      drop = FALSE
+    ) +
+    coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
+    labs(
+      title = nice_label,
+      subtitle = sprintf("Net: %+.0f km² (%+.1f%%)",
+                         stats$net_change_km2, stats$pct_change)
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "bottom")
+
+  shift_plots[[group_id]] <- p
+}
+
+if (length(shift_plots) == 4) {
+  wrap_plots(shift_plots, ncol = 2) +
+    plot_annotation(
+      title = "Range shift projections for H. longicornis (ensemble median, 5 GCMs)",
+      subtitle = "Green = habitat gain | Blue = stable suitable | Red = habitat loss"
+    )
+
+  ggsave(file.path(figures_dir, "10_fig2_range_shift_maps.png"),
+         width = 12, height = 10, dpi = 300)
+}
+```
+
+
+## 5. Publication Figure 3: GCM uncertainty
+
+```{r}
+#| label: fig-pub-uncertainty
+#| fig-cap: "Figure 3. Inter-GCM variability in projected habitat change."
+#| fig-width: 10
+#| fig-height: 8
+
+# Panel A: Box plot of net change across GCMs
+p_box <- gcm_table %>%
+  mutate(
+    scenario_label = sprintf("SSP%s\n%s", ssp, period)
+  ) %>%
+  ggplot(aes(x = scenario_label, y = pct_change)) +
+  geom_boxplot(fill = "lightblue", outlier.shape = NA) +
+  geom_jitter(aes(colour = gcm), width = 0.15, size = 2.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  labs(
+    title = "A) Inter-GCM variability in net habitat change",
+    x = NULL, y = "Net change (%)", colour = "GCM"
+  ) +
+  theme_minimal(base_size = 11)
+
+# Panel B: Extrapolation by scenario
+p_extrap <- gcm_table %>%
+  mutate(
+    scenario_label = sprintf("SSP%s\n%s", ssp, period)
+  ) %>%
+  ggplot(aes(x = scenario_label, y = pct_extrapolation)) +
+  geom_boxplot(fill = "lightyellow", outlier.shape = NA) +
+  geom_jitter(aes(colour = gcm), width = 0.15, size = 2.5) +
+  labs(
+    title = "B) Extrapolation (MESS < 0) by scenario",
+    x = NULL, y = "% cells with novel climate", colour = "GCM"
+  ) +
+  theme_minimal(base_size = 11)
+
+p_box / p_extrap +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+ggsave(file.path(figures_dir, "10_fig3_gcm_uncertainty.png"),
+       width = 10, height = 8, dpi = 300)
+```
+
+
+## 6. Priority surveillance map
+
+Identify areas that are currently unsuitable but become suitable in ≥4 of 5
+GCMs. These are high-confidence expansion zones worthy of targeted
+surveillance.
+
+```{r}
+#| label: priority-surveillance
+
+# Focus on the worst-case scenario for surveillance: SSP5-8.5, 2081-2100
+# (most expansion, highest priority for monitoring)
+
+scenario_paths <- read_csv(file.path(processed_v2, "future_scenario_paths.csv"),
+                           show_col_types = FALSE)
+
+# Find the 5 GCM predictions for SSP5-8.5, 2081-2100
+target_scenarios <- scenario_paths %>%
+  filter(ssp == "585", period == "2081-2100")
+
+if (nrow(target_scenarios) >= 4) {
+  # Stack binary predictions from all GCMs for this scenario
+  gcm_binary_stack <- rast(lapply(target_scenarios$scenario_id, function(sid) {
+    pred_file <- file.path(processed_v2, paste0("pred_future_", sid, ".tif"))
+    pred <- rast(pred_file)
+    pred >= primary_threshold
+  }))
+
+  # Count how many GCMs predict suitability at each cell
+  n_gcms_suitable <- app(gcm_binary_stack, fun = "sum", na.rm = TRUE)
+  names(n_gcms_suitable) <- "n_gcms"
+
+  # Current binary
+  current_suitable <- pred_current >= primary_threshold
+
+  # Priority surveillance: currently unsuitable BUT suitable in ≥4 GCMs
+  priority <- (current_suitable == 0) & (n_gcms_suitable >= 4)
+  names(priority) <- "priority"
+
+  # Calculate area
+  cell_area_km2 <- prod(res(priority)) * 111^2 *
+    cos(mean(ext(priority)[3:4]) * pi / 180)
+  n_priority <- global(priority, sum, na.rm = TRUE)[[1]]
+  area_priority <- n_priority * cell_area_km2
+
+  sprintf("Priority surveillance cells: %.0f (%.0f km²)", n_priority, area_priority)
+
+  # Map
+  priority_df <- as.data.frame(priority, xy = TRUE) %>%
+    filter(!is.na(priority), priority == 1)
+
+  current_df <- as.data.frame(current_suitable, xy = TRUE) %>%
+    filter(!is.na(suitability), suitability == 1)
+}
+```
+
+```{r}
+#| label: fig-priority-surveillance
+#| fig-cap: "Figure 4. Priority surveillance areas — currently unsuitable but predicted suitable by ≥4 of 5 GCMs under SSP5-8.5 2081-2100."
+#| fig-width: 10
+#| fig-height: 8
+
+if (exists("priority_df") && nrow(priority_df) > 0) {
+  ggplot() +
+    geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+    geom_raster(data = current_df, aes(x = x, y = y), fill = "#1f77b4", alpha = 0.4) +
+    geom_raster(data = priority_df, aes(x = x, y = y), fill = "#ff7f0e") +
+    coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
+    labs(
+      title = "Priority surveillance areas for H. longicornis",
+      subtitle = sprintf(
+        "Orange = new suitable habitat in ≥4/5 GCMs (SSP5-8.5, 2081–2100) — %.0f km²\nBlue = currently suitable habitat",
+        area_priority
+      )
+    ) +
+    theme_minimal(base_size = 12)
+
+  ggsave(file.path(figures_dir, "10_fig4_priority_surveillance.png"),
+         width = 10, height = 8, dpi = 300)
+} else {
+  message("No priority surveillance areas identified (or data not available)")
+}
+```
+
+```{r}
+#| label: fig-gcm-agreement
+#| fig-cap: "Number of GCMs predicting suitability under SSP5-8.5 2081-2100."
+#| fig-width: 10
+#| fig-height: 8
+
+if (exists("n_gcms_suitable")) {
+  gcm_agree_df <- as.data.frame(n_gcms_suitable, xy = TRUE) %>%
+    filter(!is.na(n_gcms), n_gcms > 0)
+
+  ggplot() +
+    geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+    geom_raster(data = gcm_agree_df, aes(x = x, y = y, fill = factor(n_gcms))) +
+    scale_fill_brewer(palette = "YlOrRd", name = "GCMs\nagreeing",
+                      direction = 1) +
+    coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
+    labs(
+      title = "GCM agreement on habitat suitability (SSP5-8.5, 2081–2100)",
+      subtitle = "Number of GCMs (out of 5) predicting suitable habitat"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "right")
+
+  ggsave(file.path(figures_dir, "10_fig5_gcm_agreement.png"),
+         width = 10, height = 8, dpi = 300)
+}
+```
+
+
+## 7. Summary tables
+
+### Model performance comparison (v1 vs v2)
+
+```{r}
+#| label: model-comparison-table
+
+comparison
+```
+
+### Range shift summary (all scenarios)
+
+```{r}
+#| label: range-shift-table
+
+shift_table %>%
+  mutate(across(where(is.numeric) & !contains("pct"), ~ round(., 0))) %>%
+  select(scenario, current_suitable_km2, future_suitable_km2,
+         gain_km2, loss_km2, net_change_km2, pct_change)
+```
+
+### Ensemble uncertainty
+
+```{r}
+#| label: uncertainty-table
+
+uncertainty %>%
+  select(ssp, period, median_pct_change, range_pct_change, median_extrapolation)
+```
+
+### Variable importance
+
+```{r}
+#| label: variable-importance-table
+
+var_importance
+```
+
+### Biological validation
+
+```{r}
+#| label: validation-table
+
+validation
+```
+
+### LORO cross-validation
+
+```{r}
+#| label: loro-table
+
+loro_results
+```
+
+
+## 8. Save final outputs
+
+```{r}
+#| label: save-final
+
+# Save priority surveillance raster if available
+if (exists("priority")) {
+  writeRaster(priority,
+              file.path(processed_v2, "priority_surveillance.tif"),
+              overwrite = TRUE)
+  writeRaster(n_gcms_suitable,
+              file.path(processed_v2, "gcm_agreement_ssp585_2081.tif"),
+              overwrite = TRUE)
+}
+
+# Save a combined results summary
+results_overview <- tibble(
+  Section = c(
+    rep("Model", 5),
+    rep("Current prediction", 3),
+    rep("Validation", 4),
+    rep("Future (median across SSP×period)", nrow(shift_table))
+  ),
+  Metric = c(
+    "Feature class", "Regularization", "AUC", "TSS", "Kappa",
+    "Suitable area (km²)", "MESS extrapolation (%)", "Threshold (MaxSS)",
+    "East coast suitability", "Desert suitability",
+    "Schoener's D", "Warren's I",
+    paste0("Net change (", shift_table$scenario, ")")
+  ),
+  Value = c(
+    comparison$v2[comparison$Metric == "Feature class"],
+    comparison$v2[comparison$Metric == "Regularization (β)"],
+    as.character(metrics$Value[metrics$Metric == "AUC"]),
+    as.character(metrics$Value[metrics$Metric == "TSS"]),
+    as.character(metrics$Value[metrics$Metric == "Kappa"]),
+    comparison$v2[comparison$Metric == "Background sampling"],
+    sprintf("%.1f%%", 100 * global(mess_current < 0, sum, na.rm = TRUE)[[1]] /
+              global(!is.na(mess_current), sum)[[1]]),
+    sprintf("%.4f", primary_threshold),
+    validation$Value[1],
+    validation$Value[2],
+    sprintf("%.3f", niche_overlap$Value[1]),
+    sprintf("%.3f", niche_overlap$Value[2]),
+    sprintf("%+.0f km² (%+.1f%%)", shift_table$net_change_km2, shift_table$pct_change)
+  )
+)
+
+write_csv(results_overview, file.path(outputs_dir, "results_overview_v2.csv"))
+
+sprintf("All visualization and results outputs saved")
+```
+
+
+## 9. Final interpretation notes
+
+The following points should be included in any manuscript or report using
+these results:
+
+1. **The model represents a range shift, not simple expansion.** Under all
+   future scenarios, some currently suitable habitat becomes unsuitable while
+   new areas become suitable. The net change masks important spatial
+   redistribution.
+
+2. **Extrapolation uncertainty is present** — the MESS analysis shows that
+   some proportion of Aus/NZ cells fall outside the training data's climate
+   envelope. Predictions in these areas should be interpreted with caution.
+
+3. **GCM choice matters.** The spread across 5 GCMs shows substantial
+   uncertainty in the magnitude (and sometimes direction) of projected
+   changes. Ensemble median is more robust than mean due to potential
+   outlier GCMs.
+
+4. **ENVIREM/CHELSA future variables were approximated** using delta-change
+   methods rather than directly modeled by GCMs. This adds an additional
+   layer of uncertainty, particularly for moisture-balance variables under
+   scenarios with large precipitation changes.
+
+5. **No dispersal constraints were applied.** The model assumes the species
+   can colonize any newly suitable habitat immediately. In reality, expansion
+   rates depend on livestock movement, wildlife corridors, and human-mediated
+   transport. The suitable area maps should be interpreted as potential
+   (not predicted) habitat.
+
+
+## Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

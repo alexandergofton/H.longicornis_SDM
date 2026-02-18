@@ -1,0 +1,621 @@
+---
+title: "Step 6: Model Evaluation"
+author: "Alexander W. Gofton"
+date: today
+format: gfm
+---
+
+## Overview
+
+Comprehensive model evaluation with side-by-side comparison to v1 metrics.
+This step covers:
+
+- Standard discrimination metrics (AUC, TSS, Kappa)
+- MESS analysis for extrapolation risk
+- Biological validation against known distribution
+- Ecospat niche overlap (Schoener's D, Warren's I)
+- Principled threshold selection (MaxSS, 10th percentile, equal sens/spec)
+- Leave-one-region-out (LORO) cross-validation for transferability
+
+```{r}
+#| label: setup
+#| message: false
+
+options(java.parameters = "-Xmx8g")
+
+library(tidyverse)
+library(terra)
+library(sf)
+library(predicts)
+library(rJava)
+library(ecospat)
+library(dismo)
+library(rnaturalearth)
+library(rnaturalearthdata)
+```
+
+```{r}
+#| label: paths
+
+base_dir <- "~/Library/CloudStorage/OneDrive-CSIRO/OneDrive - Docs/01_Projects/Hlongicornis_SDM/"
+processed_v2 <- file.path(base_dir, "processed_data_2")
+figures_dir  <- file.path(base_dir, "figures_2")
+outputs_dir  <- file.path(base_dir, "outputs_2")
+```
+
+
+## 1. Load model, data, and environmental rasters
+
+```{r}
+#| label: load-data
+
+# The selected MaxEnt model from Step 5
+selected_model <- readRDS(file.path(processed_v2, "selected_maxent_model.rds"))
+
+# ENMeval results for cross-validation metrics
+enmeval_results <- readRDS(file.path(processed_v2, "enmeval_results.rds"))
+
+# Occurrence data with region assignments
+occ <- read_csv(file.path(processed_v2, "occurrences_stratified.csv"),
+                show_col_types = FALSE)
+occ_coords <- read_csv(file.path(processed_v2, "occurrence_coords.csv"),
+                       show_col_types = FALSE)
+
+# Background points with climate values
+bg_points <- read_csv(file.path(processed_v2, "background_points.csv"),
+                      show_col_types = FALSE)
+
+# Environmental rasters
+env_M     <- readRDS(file.path(processed_v2, "env_selected_M.rds"))
+env_aus_nz <- rast(file.path(processed_v2, "env_selected_aus_nz.tif"))
+
+# Accessible area polygon
+accessible_area <- st_read(file.path(processed_v2, "accessible_area_M.gpkg"),
+                           quiet = TRUE)
+
+# Model selection summary
+model_summary <- read_csv(file.path(outputs_dir, "model_selection_summary_v2.csv"),
+                          show_col_types = FALSE)
+
+sprintf("Occurrences: %d | Background: %d", nrow(occ), nrow(bg_points))
+```
+
+
+## 2. Threshold selection
+
+Calculate principled thresholds from the training data rather than using
+an arbitrary 0.5 cutoff.
+
+```{r}
+#| label: threshold-selection
+
+# Predict suitability at presence and background locations
+selected_vars <- names(env_M)
+
+# Extract environmental values at presence points
+pres_env <- extract(env_M, as.matrix(occ_coords))
+pres_pred <- predict(selected_model, pres_env, type = "cloglog")
+
+# Extract environmental values at background points
+bg_env <- bg_points %>% select(all_of(selected_vars))
+bg_pred <- predict(selected_model, bg_env, type = "cloglog")
+
+# Combine for threshold analysis
+eval_data <- tibble(
+  suitability = c(pres_pred, bg_pred),
+  presence = c(rep(1, length(pres_pred)), rep(0, length(bg_pred)))
+) %>%
+  filter(!is.na(suitability))
+
+# Calculate thresholds using predicts/dismo evaluate function
+eval_obj <- evaluate(
+  p = pres_pred[!is.na(pres_pred)],
+  a = bg_pred[!is.na(bg_pred)]
+)
+
+# Maximum Sensitivity + Specificity (MaxSS) — our primary threshold
+# This maximises the sum of sensitivity and specificity
+spec_sens <- eval_obj@t[which.max(eval_obj@TPR + eval_obj@TNR)]
+
+# 10th percentile training presence threshold
+# The suitability value below which 10% of training presences fall
+p10_threshold <- quantile(pres_pred, probs = 0.10, na.rm = TRUE)
+
+# Equal sensitivity and specificity threshold
+# Where sensitivity = specificity
+sens_spec_diff <- abs(eval_obj@TPR - eval_obj@TNR)
+equal_sens_spec <- eval_obj@t[which.min(sens_spec_diff)]
+
+# Report all thresholds
+thresholds <- tibble(
+  Method = c(
+    "Maximum Sensitivity + Specificity (MaxSS) [PRIMARY]",
+    "10th percentile training presence",
+    "Equal Sensitivity and Specificity"
+  ),
+  Threshold = c(spec_sens, p10_threshold, equal_sens_spec)
+)
+thresholds
+
+# Use MaxSS as the primary threshold throughout
+primary_threshold <- spec_sens
+sprintf("Primary threshold (MaxSS): %.4f", primary_threshold)
+```
+
+
+## 3. Discrimination metrics
+
+```{r}
+#| label: discrimination-metrics
+
+# AUC
+auc_value <- eval_obj@auc
+
+# TSS (True Skill Statistic) at the MaxSS threshold
+# TSS = sensitivity + specificity - 1
+tss_idx <- which.min(abs(eval_obj@t - primary_threshold))
+sensitivity_at_thresh <- eval_obj@TPR[tss_idx]
+specificity_at_thresh <- eval_obj@TNR[tss_idx]
+tss_value <- sensitivity_at_thresh + specificity_at_thresh - 1
+
+# Kappa at MaxSS threshold
+# Calculate confusion matrix components
+pred_binary <- ifelse(pres_pred >= primary_threshold, 1, 0)
+bg_binary   <- ifelse(bg_pred >= primary_threshold, 1, 0)
+tp <- sum(pred_binary == 1, na.rm = TRUE)
+fn <- sum(pred_binary == 0, na.rm = TRUE)
+fp <- sum(bg_binary == 1, na.rm = TRUE)
+tn <- sum(bg_binary == 0, na.rm = TRUE)
+n_total <- tp + fn + fp + tn
+
+observed_accuracy <- (tp + tn) / n_total
+expected_accuracy <- ((tp + fp) * (tp + fn) + (fn + tn) * (fp + tn)) / (n_total^2)
+kappa_value <- (observed_accuracy - expected_accuracy) / (1 - expected_accuracy)
+
+# Mean suitability at occurrence points
+mean_suit_occ <- mean(pres_pred, na.rm = TRUE)
+
+# Compile metrics
+metrics <- tibble(
+  Metric = c("AUC", "TSS", "Kappa", "Sensitivity (MaxSS)",
+             "Specificity (MaxSS)", "Mean suitability at occurrences",
+             "Primary threshold (MaxSS)"),
+  Value = round(c(auc_value, tss_value, kappa_value,
+                  sensitivity_at_thresh, specificity_at_thresh,
+                  mean_suit_occ, primary_threshold), 4)
+)
+
+metrics
+```
+
+
+## 4. Side-by-side comparison with v1
+
+```{r}
+#| label: v1-comparison
+
+# v1 metrics (from processed_data/model_performance_summary.csv)
+comparison <- tibble(
+  Metric = c(
+    "Training AUC",
+    "Test/Validation AUC",
+    "Kappa",
+    "TSS",
+    "Mean suitability at occurrences",
+    "Number of coefficients",
+    "Background sampling",
+    "Primary threshold"
+  ),
+  v1 = c(
+    "0.977", "0.976 (random) / 0.900 (block CV)",
+    "0.369", "0.620",
+    "0.498", "152",
+    "Global random (all land)", "0.500 (arbitrary)"
+  ),
+  v2 = c(
+    sprintf("%.4f", as.numeric(model_summary$value[model_summary$parameter == "auc_train"])),
+    sprintf("%.4f", as.numeric(model_summary$value[model_summary$parameter == "auc_val"])),
+    sprintf("%.4f", kappa_value),
+    sprintf("%.4f", tss_value),
+    sprintf("%.4f", mean_suit_occ),
+    model_summary$value[model_summary$parameter == "n_coefficients"],
+    "Within M (1000 km buffer, bias-corrected)",
+    sprintf("%.4f (MaxSS)", primary_threshold)
+  )
+)
+
+comparison
+```
+
+
+## 5. MESS analysis (Australia/NZ)
+
+MESS (Multivariate Environmental Similarity Surface) identifies cells in
+the projection area where one or more environmental variables fall outside
+the range observed in the training data. These cells represent extrapolation
+and predictions there are unreliable.
+
+```{r}
+#| label: mess-analysis
+
+# Training environment: values at presence + background points within M
+training_env <- bind_rows(
+  extract(env_M, as.matrix(occ_coords)) %>% as_tibble(),
+  bg_points %>% select(all_of(selected_vars))
+) %>%
+  drop_na()
+
+# Compute MESS for Australia/NZ
+mess_aus_nz <- mess(env_aus_nz, training_env, full = FALSE)
+names(mess_aus_nz) <- "mess"
+
+# Calculate percentage of cells with novel conditions (MESS < 0)
+n_valid <- global(!is.na(mess_aus_nz), sum)[[1]]
+n_novel <- global(mess_aus_nz < 0, sum, na.rm = TRUE)[[1]]
+pct_novel <- round(100 * n_novel / n_valid, 1)
+
+sprintf("MESS analysis — Australia/NZ:")
+sprintf("  Valid cells:     %.0f", n_valid)
+sprintf("  Novel cells:     %.0f (MESS < 0)", n_novel)
+sprintf("  Extrapolation:   %.1f%%", pct_novel)
+sprintf("  v1 extrapolation: 92.0%% (expected to be much lower now)")
+```
+
+```{r}
+#| label: fig-mess
+#| fig-cap: "MESS analysis for Australia/NZ. Red areas have novel climate relative to training data."
+#| fig-width: 10
+#| fig-height: 8
+
+# Convert to data frame for plotting
+mess_df <- as.data.frame(mess_aus_nz, xy = TRUE) %>%
+  filter(!is.na(mess))
+
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+ggplot() +
+  geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_raster(data = mess_df, aes(x = x, y = y, fill = mess)) +
+  scale_fill_gradient2(
+    low = "red", mid = "white", high = "blue",
+    midpoint = 0, name = "MESS",
+    limits = c(min(mess_df$mess), max(mess_df$mess))
+  ) +
+  coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
+  labs(
+    title = "Multivariate Environmental Similarity Surface (MESS)",
+    subtitle = sprintf("%.1f%% of cells have novel conditions (MESS < 0) — v1 was 92%%",
+                       pct_novel)
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(file.path(figures_dir, "06_mess_aus_nz.png"),
+       width = 10, height = 8, dpi = 300)
+```
+
+
+## 6. Biological validation
+
+Test whether the model correctly predicts suitability in areas where
+*H. longicornis* is known to occur (or not occur) in Australia.
+
+```{r}
+#| label: biological-validation
+
+# Predict suitability across Australia/NZ
+pred_aus_nz <- predict(env_aus_nz, selected_model, type = "cloglog")
+names(pred_aus_nz) <- "suitability"
+
+# 6a. Eastern coast validation (Sydney–Brisbane corridor)
+# This is the core area where H. longicornis is established in Australia
+# Approximate bounding box: 150-154°E, 27-34°S
+east_coast_ext <- ext(150, 154, -34, -27)
+pred_east_coast <- crop(pred_aus_nz, east_coast_ext)
+mean_suit_east <- global(pred_east_coast, mean, na.rm = TRUE)[[1]]
+
+# 6b. Known absence areas (central Australia, western deserts)
+# Approximate bounding box: 125-140°E, 20-30°S
+desert_ext <- ext(125, 140, -30, -20)
+pred_desert <- crop(pred_aus_nz, desert_ext)
+mean_suit_desert <- global(pred_desert, mean, na.rm = TRUE)[[1]]
+
+# 6c. Report results with pass/fail
+validation_results <- tibble(
+  Check = c(
+    "Eastern coast (Sydney–Brisbane): mean suitability > 0.3",
+    "Central deserts: mean suitability < 0.2"
+  ),
+  Value = c(
+    sprintf("%.4f", mean_suit_east),
+    sprintf("%.4f", mean_suit_desert)
+  ),
+  Status = c(
+    ifelse(mean_suit_east > 0.3, "PASS", "FAIL"),
+    ifelse(mean_suit_desert < 0.2, "PASS", "FAIL")
+  ),
+  v1_Value = c("0.157 (FAILED)", "N/A")
+)
+
+validation_results
+
+# Flag prominently if eastern coast check fails
+if (mean_suit_east <= 0.3) {
+  message("============================================================")
+  message("WARNING: EASTERN COAST BIOLOGICAL VALIDATION FAILED")
+  message(sprintf("Mean suitability = %.4f (threshold = 0.3)", mean_suit_east))
+  message("The model is not predicting suitable habitat where H. longicornis")
+  message("is known to occur in Australia. Investigate variable selection,")
+  message("background sampling, and model complexity.")
+  message("============================================================")
+}
+```
+
+
+## 7. Leave-One-Region-Out (LORO) cross-validation
+
+Test model transferability by training on all regions except one,
+then predicting the held-out region.
+
+```{r}
+#| label: loro-cv
+
+# Occurrence data with region assignments
+occ_with_region <- occ
+
+# Get unique regions
+regions <- unique(occ_with_region$region)
+sprintf("Regions for LORO CV: %s", paste(regions, collapse = ", "))
+
+# Run LORO for each region
+loro_results <- list()
+
+for (held_out in regions) {
+  # Split: train on all other regions, test on held-out
+
+  train_idx <- occ_with_region$region != held_out
+  test_idx  <- occ_with_region$region == held_out
+
+  train_coords <- occ_with_region[train_idx, c("lon", "lat")]
+  test_coords  <- occ_with_region[test_idx, c("lon", "lat")]
+
+  # Extract env values
+  train_env <- extract(env_M, as.matrix(train_coords))
+  test_env  <- extract(env_M, as.matrix(test_coords))
+
+  # Fit a MaxEnt model with the same settings on the training subset
+  # Use the same feature class and regularization as the selected model
+  fc_selected <- model_summary$value[model_summary$parameter == "feature_class"]
+  rm_selected <- as.numeric(model_summary$value[model_summary$parameter == "regularization"])
+
+  # Build args string for MaxEnt
+  fc_args <- paste0(
+    c("nolinear", "noquadratic", "nohinge", "noproduct", "nothreshold"),
+    collapse = ","
+  )
+  # Enable the selected features
+  fc_chars <- strsplit(tolower(fc_selected), "")[[1]]
+  fc_enable <- character(0)
+  if ("l" %in% fc_chars) fc_enable <- c(fc_enable, "linear=true")
+  if ("q" %in% fc_chars) fc_enable <- c(fc_enable, "quadratic=true")
+  if ("h" %in% fc_chars) fc_enable <- c(fc_enable, "hinge=true")
+  if ("p" %in% fc_chars) fc_enable <- c(fc_enable, "product=true")
+  if ("t" %in% fc_chars) fc_enable <- c(fc_enable, "threshold=true")
+
+  tryCatch({
+    loro_model <- MaxEnt(
+      x = env_M,
+      p = as.matrix(train_coords),
+      a = as.matrix(bg_points[, c("lon", "lat")]),
+      args = c(
+        paste0("betamultiplier=", rm_selected),
+        "outputformat=cloglog"
+      )
+    )
+
+    # Predict at test (held-out) locations
+    test_pred <- predict(loro_model, test_env, type = "cloglog")
+
+    # Predict at background for AUC calculation
+    bg_pred_loro <- predict(loro_model, bg_env, type = "cloglog")
+
+    # Calculate AUC for the held-out region
+    eval_loro <- evaluate(
+      p = test_pred[!is.na(test_pred)],
+      a = bg_pred_loro[!is.na(bg_pred_loro)]
+    )
+
+    loro_results[[held_out]] <- tibble(
+      region = held_out,
+      n_train = sum(train_idx),
+      n_test = sum(test_idx),
+      auc = eval_loro@auc,
+      mean_suitability = mean(test_pred, na.rm = TRUE)
+    )
+
+  }, error = function(e) {
+    message(sprintf("LORO failed for region %s: %s", held_out, e$message))
+    loro_results[[held_out]] <- tibble(
+      region = held_out,
+      n_train = sum(train_idx),
+      n_test = sum(test_idx),
+      auc = NA_real_,
+      mean_suitability = NA_real_
+    )
+  })
+}
+
+loro_table <- bind_rows(loro_results)
+loro_table
+```
+
+
+## 8. Ecospat niche overlap analysis
+
+Compare the environmental niche between native (East Asia) and invaded
+(Oceania) ranges using Schoener's D and Warren's I.
+
+```{r}
+#| label: ecospat-niche-overlap
+
+# Separate occurrence records by native vs. invaded range
+native_occ <- occ_with_region %>%
+  filter(region == "East_Asia") %>%
+  select(lon, lat)
+
+invaded_occ <- occ_with_region %>%
+  filter(region == "Oceania") %>%
+  select(lon, lat)
+
+# We need background climate data for both ranges
+# Extract climate at all background points for the PCA
+bg_climate <- bg_points %>% select(all_of(selected_vars))
+
+# Extract climate at native and invaded occurrences
+native_climate  <- extract(env_M, as.matrix(native_occ)) %>%
+  select(all_of(selected_vars)) %>%
+  drop_na()
+
+invaded_climate <- extract(env_M, as.matrix(invaded_occ)) %>%
+  select(all_of(selected_vars)) %>%
+  drop_na()
+
+# Run PCA on the background climate (calibration environment)
+pca_env <- dudi.pca(bg_climate, scannf = FALSE, nf = 2)
+
+# Score the native and invaded occurrences on the PCA axes
+native_scores  <- suprow(pca_env, native_climate)$li
+invaded_scores <- suprow(pca_env, invaded_climate)$li
+bg_scores      <- pca_env$li
+
+# Create ecospat grids for each range
+# Grid resolution for kernel density
+grid_res <- 100
+
+native_grid <- ecospat.grid.clim.dyn(
+  glob = bg_scores,
+  glob1 = bg_scores,
+  sp = native_scores,
+  R = grid_res
+)
+
+invaded_grid <- ecospat.grid.clim.dyn(
+  glob = bg_scores,
+  glob1 = bg_scores,
+  sp = invaded_scores,
+  R = grid_res
+)
+
+# Calculate niche overlap metrics
+overlap <- ecospat.niche.overlap(native_grid, invaded_grid, cor = TRUE)
+
+sprintf("Niche overlap — Native (East Asia) vs Invaded (Oceania):")
+sprintf("  Schoener's D: %.4f", overlap$D)
+sprintf("  Warren's I:   %.4f", overlap$I)
+```
+
+```{r}
+#| label: fig-niche-overlap
+#| fig-cap: "Niche overlap between native (East Asian) and invaded (Oceanian) ranges in environmental space."
+#| fig-width: 10
+#| fig-height: 5
+
+par(mfrow = c(1, 2))
+
+# Plot native niche
+ecospat.plot.niche(native_grid, title = "Native range (East Asia)",
+                   name.axis1 = "PC1", name.axis2 = "PC2")
+
+# Plot invaded niche
+ecospat.plot.niche(invaded_grid, title = "Invaded range (Oceania)",
+                   name.axis1 = "PC1", name.axis2 = "PC2")
+
+par(mfrow = c(1, 1))
+
+# Save as combined figure
+png(file.path(figures_dir, "06_niche_overlap.png"),
+    width = 10, height = 5, units = "in", res = 300)
+par(mfrow = c(1, 2))
+ecospat.plot.niche(native_grid, title = "Native range (East Asia)",
+                   name.axis1 = "PC1", name.axis2 = "PC2")
+ecospat.plot.niche(invaded_grid, title = "Invaded range (Oceania)",
+                   name.axis1 = "PC1", name.axis2 = "PC2")
+dev.off()
+```
+
+
+## 9. Save evaluation outputs
+
+```{r}
+#| label: save-outputs
+
+# Save all metrics
+write_csv(metrics, file.path(outputs_dir, "model_metrics_v2.csv"))
+write_csv(comparison, file.path(outputs_dir, "v1_v2_comparison.csv"))
+write_csv(thresholds, file.path(outputs_dir, "threshold_values_v2.csv"))
+write_csv(validation_results, file.path(outputs_dir, "biological_validation_v2.csv"))
+write_csv(loro_table, file.path(outputs_dir, "loro_cv_results_v2.csv"))
+
+# Save niche overlap results
+niche_overlap_results <- tibble(
+  Metric = c("Schoener's D", "Warren's I"),
+  Value = c(overlap$D, overlap$I)
+)
+write_csv(niche_overlap_results, file.path(outputs_dir, "niche_overlap_v2.csv"))
+
+# Save MESS raster
+writeRaster(mess_aus_nz, file.path(processed_v2, "mess_aus_nz.tif"),
+            overwrite = TRUE)
+
+# Save the current prediction raster (used in Step 7 and beyond)
+writeRaster(pred_aus_nz, file.path(processed_v2, "prediction_current_aus_nz.tif"),
+            overwrite = TRUE)
+
+# Save the primary threshold for use in later steps
+writeLines(as.character(primary_threshold),
+           file.path(processed_v2, "primary_threshold.txt"))
+
+sprintf("Evaluation outputs saved to %s", outputs_dir)
+```
+
+
+## Summary
+
+```{r}
+#| label: summary
+
+# Full evaluation summary
+tibble(
+  Category = c(
+    rep("Discrimination", 3),
+    rep("Thresholds", 3),
+    rep("Extrapolation", 2),
+    rep("Biological validation", 2),
+    rep("Niche overlap", 2),
+    rep("LORO CV", length(regions))
+  ),
+  Metric = c(
+    "AUC", "TSS", "Kappa",
+    "MaxSS", "10th percentile", "Equal sens/spec",
+    "% novel cells (Aus/NZ)", "v1 novel cells",
+    "East coast mean suitability", "Desert mean suitability",
+    "Schoener's D", "Warren's I",
+    paste0("LORO AUC (", loro_table$region, ")")
+  ),
+  Value = c(
+    round(auc_value, 4), round(tss_value, 4), round(kappa_value, 4),
+    round(spec_sens, 4), round(p10_threshold, 4), round(equal_sens_spec, 4),
+    pct_novel, 92.0,
+    round(mean_suit_east, 4), round(mean_suit_desert, 4),
+    round(overlap$D, 4), round(overlap$I, 4),
+    round(loro_table$auc, 4)
+  )
+)
+```
+
+
+## Session Information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```
