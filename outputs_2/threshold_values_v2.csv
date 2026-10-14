@@ -1,0 +1,4 @@
+Method,Threshold
+Maximum Sensitivity + Specificity (MaxSS) [PRIMARY],0.21375527
+10th percentile training presence,0.1469065397977829
+Equal Sensitivity and Specificity,0.19274628000000002

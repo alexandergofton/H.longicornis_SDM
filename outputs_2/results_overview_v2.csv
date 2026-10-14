@@ -1,0 +1,17 @@
+Section,Metric,Value
+Model,Feature class,NA
+Model,Regularization,NA
+Model,AUC,0.9144
+Model,TSS,0.7166
+Model,Kappa,0.2933
+Current prediction,Suitable area (km²),"Within M (1000 km buffer, bias-corrected)"
+Current prediction,MESS extrapolation (%),5.6%
+Current prediction,Threshold (MaxSS),0.2138
+Validation,East coast suitability,0.3952
+Validation,Desert suitability,0.0289
+Validation,Schoener's D,0.166
+Validation,Warren's I,0.278
+Future (median across SSP×period),Net change (ssp245_2041-2060),-442348 km² (-18.8%)
+Future (median across SSP×period),Net change (ssp245_2081-2100),-655844 km² (-27.9%)
+Future (median across SSP×period),Net change (ssp585_2041-2060),-551797 km² (-23.5%)
+Future (median across SSP×period),Net change (ssp585_2081-2100),-1050994 km² (-44.7%)

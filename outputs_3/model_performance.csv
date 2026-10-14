@@ -1,0 +1,8 @@
+Evaluation,Test data,n,AUC,CBI,OR10
+Leave-one-region-out,East Asia (native),215,0.7400153533529014,0.512,0.5116279069767442
+Leave-one-region-out,North America (invaded),53,0.9180500148647994,0.994,0
+Leave-one-region-out,Oceania (invaded),121,0.9149740198393954,0.936,0.30578512396694213
+Spatial block CV (5 folds),Mean across folds,389,0.8156152319223616,0.8396,0.17772417438236948
+In-sample (full model),East Asia (native),215,0.8158509821630164,0.964,0.1209302325581395
+In-sample (full model),North America (invaded),53,0.8921576083574743,0.969,0
+In-sample (full model),Oceania (invaded),121,0.9241910234738852,0.948,0.1074380165289256

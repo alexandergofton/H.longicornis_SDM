@@ -2,7 +2,22 @@
 title: "Step 6: Model Evaluation"
 author: "Alexander W. Gofton"
 date: today
-format: gfm
+format:
+  gfm:
+    toc: true
+    toc-depth: 3
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    results: hold
 ---
 
 ## Overview
@@ -21,7 +36,7 @@ This step covers:
 #| label: setup
 #| message: false
 
-options(java.parameters = "-Xmx8g")
+options(java.parameters = "-Xmx12g")
 
 library(tidyverse)
 library(terra)
@@ -29,6 +44,7 @@ library(sf)
 library(predicts)
 library(rJava)
 library(ecospat)
+library(ade4)
 library(dismo)
 library(rnaturalearth)
 library(rnaturalearthdata)
@@ -93,11 +109,11 @@ an arbitrary 0.5 cutoff.
 selected_vars <- names(env_M)
 
 # Extract environmental values at presence points
-pres_env <- extract(env_M, as.matrix(occ_coords))
+pres_env <- extract(env_M, as.matrix(occ_coords[, c("lon", "lat")]))
 pres_pred <- predict(selected_model, pres_env, type = "cloglog")
 
 # Extract environmental values at background points
-bg_env <- bg_points %>% select(all_of(selected_vars))
+bg_env <- bg_points %>% dplyr::select(all_of(selected_vars))
 bg_pred <- predict(selected_model, bg_env, type = "cloglog")
 
 # Combine for threshold analysis
@@ -240,13 +256,15 @@ and predictions there are unreliable.
 
 # Training environment: values at presence + background points within M
 training_env <- bind_rows(
-  extract(env_M, as.matrix(occ_coords)) %>% as_tibble(),
-  bg_points %>% select(all_of(selected_vars))
+  extract(env_M, as.matrix(occ_coords[, c("lon", "lat")])) %>%
+    as_tibble() %>%
+    dplyr::select(all_of(selected_vars)),
+  bg_points %>% dplyr::select(all_of(selected_vars))
 ) %>%
   drop_na()
 
 # Compute MESS for Australia/NZ
-mess_aus_nz <- mess(env_aus_nz, training_env, full = FALSE)
+mess_aus_nz <- dismo::mess(raster::stack(env_aus_nz), as.data.frame(training_env), full = FALSE) %>% rast()
 names(mess_aus_nz) <- "mess"
 
 # Calculate percentage of cells with novel conditions (MESS < 0)
@@ -460,49 +478,64 @@ Compare the environmental niche between native (East Asia) and invaded
 # Separate occurrence records by native vs. invaded range
 native_occ <- occ_with_region %>%
   filter(region == "East_Asia") %>%
-  select(lon, lat)
+  dplyr::select(lon, lat)
 
 invaded_occ <- occ_with_region %>%
   filter(region == "Oceania") %>%
-  select(lon, lat)
+  dplyr::select(lon, lat)
 
 # We need background climate data for both ranges
 # Extract climate at all background points for the PCA
-bg_climate <- bg_points %>% select(all_of(selected_vars))
+bg_climate <- bg_points %>% dplyr::select(all_of(selected_vars))
 
 # Extract climate at native and invaded occurrences
+# Use both env_M (training region) and env_aus_nz (projection region) to cover all points
 native_climate  <- extract(env_M, as.matrix(native_occ)) %>%
-  select(all_of(selected_vars)) %>%
+  dplyr::select(all_of(selected_vars)) %>%
   drop_na()
 
-invaded_climate <- extract(env_M, as.matrix(invaded_occ)) %>%
-  select(all_of(selected_vars)) %>%
+invaded_climate <- extract(env_aus_nz, as.matrix(invaded_occ)) %>%
+  dplyr::select(all_of(selected_vars)) %>%
   drop_na()
 
-# Run PCA on the background climate (calibration environment)
-pca_env <- dudi.pca(bg_climate, scannf = FALSE, nf = 2)
+# Run PCA on the combined background + invaded climate so PCA space covers both ranges
+all_climate <- bind_rows(bg_climate, invaded_climate) %>% drop_na()
+pca_env <- dudi.pca(all_climate, scannf = FALSE, nf = 2)
 
 # Score the native and invaded occurrences on the PCA axes
-native_scores  <- suprow(pca_env, native_climate)$li
-invaded_scores <- suprow(pca_env, invaded_climate)$li
-bg_scores      <- pca_env$li
+native_scores  <- suprow(pca_env, native_climate)$li %>% drop_na()
+invaded_scores <- suprow(pca_env, invaded_climate)$li %>% drop_na()
+bg_scores      <- suprow(pca_env, bg_climate)$li %>% drop_na()
 
 # Create ecospat grids for each range
 # Grid resolution for kernel density
+# Extend extent slightly so edge points fall within the density raster
 grid_res <- 100
+ext_margin <- c(0.5, 0.5, 0.5, 0.5)
+
+# Combine all scores to define the full environmental space
+all_scores <- bind_rows(bg_scores, native_scores, invaded_scores)
 
 native_grid <- ecospat.grid.clim.dyn(
-  glob = bg_scores,
+  glob = all_scores,
   glob1 = bg_scores,
   sp = native_scores,
-  R = grid_res
+  R = grid_res,
+  th.sp = NULL,
+  th.env = NULL,
+  extend.extent = ext_margin,
+  kernel.method = "ks"
 )
 
 invaded_grid <- ecospat.grid.clim.dyn(
-  glob = bg_scores,
+  glob = all_scores,
   glob1 = bg_scores,
   sp = invaded_scores,
-  R = grid_res
+  R = grid_res,
+  th.sp = NULL,
+  th.env = NULL,
+  extend.extent = ext_margin,
+  kernel.method = "ks"
 )
 
 # Calculate niche overlap metrics

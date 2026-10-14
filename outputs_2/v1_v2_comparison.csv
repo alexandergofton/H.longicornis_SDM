@@ -1,0 +1,9 @@
+Metric,v1,v2
+Training AUC,0.977,0.9144
+Test/Validation AUC,0.976 (random) / 0.900 (block CV),0.8359
+Kappa,0.369,0.2933
+TSS,0.620,0.7166
+Mean suitability at occurrences,0.498,0.6820
+Number of coefficients,152,77
+Background sampling,Global random (all land),"Within M (1000 km buffer, bias-corrected)"
+Primary threshold,0.500 (arbitrary),0.2138 (MaxSS)

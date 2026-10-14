@@ -2,7 +2,22 @@
 title: "Step 7: Current Prediction for Australia/NZ"
 author: "Alexander W. Gofton"
 date: today
-format: gfm
+format:
+  gfm:
+    toc: true
+    toc-depth: 3
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    results: hold
 ---
 
 ## Overview
@@ -29,6 +44,7 @@ library(rnaturalearth)
 library(rnaturalearthdata)
 library(predicts)
 library(rJava)
+library(viridis)
 ```
 
 ```{r}
@@ -142,13 +158,13 @@ occ <- read_csv(file.path(processed_v2, "occurrences_stratified.csv"),
 ggplot() +
   geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
   geom_raster(data = pred_df, aes(x = x, y = y, fill = suitability)) +
-  scale_fill_viridis_c(
-    name = "Habitat\nsuitability",
-    option = "magma",
-    limits = c(0, 1)
+  scale_fill_gradientn(
+    colours = c("white", magma(256, direction = -1)),
+    limits = c(0, 1),
+    name = "Habitat\nSuitability"
   ) +
   geom_point(data = occ, aes(x = lon, y = lat),
-             colour = "cyan", size = 1, alpha = 0.7, shape = 16) +
+             colour = "cyan", size = 1, alpha = 1, shape = 16) +
   coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
   labs(
     title = "H. longicornis habitat suitability — current climate",

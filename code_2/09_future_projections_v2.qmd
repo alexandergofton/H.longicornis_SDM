@@ -2,7 +2,24 @@
 title: "Step 9: Future Projections"
 author: "Alexander W. Gofton"
 date: today
-format: gfm
+format:
+  gfm:
+    toc: true
+    toc-depth: 3
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme:
+      light: cosmo
+      dark: darkly
+execute:
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    results: hold
 ---
 
 ## Overview
@@ -31,6 +48,7 @@ library(predicts)
 library(rJava)
 library(rnaturalearth)
 library(rnaturalearthdata)
+library(viridis)
 ```
 
 ```{r}
@@ -80,10 +98,11 @@ env_M <- readRDS(file.path(processed_v2, "env_selected_M.rds"))
 
 selected_vars <- names(env_current)
 training_env <- bind_rows(
-  extract(env_M, as.matrix(occ_coords)) %>% as_tibble(),
-  bg_points %>% select(all_of(selected_vars))
-) %>%
-  drop_na()
+  extract(env_M, as.matrix(occ_coords[, c("lon", "lat")])) |> as_tibble(),
+  bg_points |> dplyr::select(all_of(selected_vars))
+) |>
+  drop_na() |>
+  as.data.frame()
 
 sprintf("Scenarios to project: %d", nrow(scenario_paths))
 sprintf("Threshold (MaxSS): %.4f", primary_threshold)
@@ -368,7 +387,11 @@ for (group_id in names(ensemble_results)) {
   p <- ggplot() +
     geom_sf(data = world_map, fill = "grey95", colour = "grey70", linewidth = 0.2) +
     geom_raster(data = median_df, aes(x = x, y = y, fill = median)) +
-    scale_fill_viridis_c(name = "Suitability", option = "magma", limits = c(0, 1)) +
+    scale_fill_gradientn(
+        colours = c("white", magma(256, direction = -1)),
+        limits = c(0, 1),
+        name = "Habitat\nSuitability"
+      ) +
     coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
     labs(title = gsub("_", " ", toupper(group_id))) +
     theme_minimal(base_size = 10) +
@@ -395,7 +418,7 @@ ggsave(file.path(figures_dir, "09_ensemble_suitability_maps.png"),
 #| fig-height: 6
 
 shift_long <- shift_table %>%
-  select(scenario, stable_suitable_km2, gain_km2, loss_km2) %>%
+  dplyr::select(scenario, stable_suitable_km2, gain_km2, loss_km2) %>%
   pivot_longer(-scenario, names_to = "category", values_to = "area_km2") %>%
   mutate(
     category = case_when(
@@ -474,7 +497,7 @@ sprintf("Future projection outputs saved to %s", outputs_dir)
 
 # High-level summary
 shift_table %>%
-  select(scenario, current_suitable_km2, future_suitable_km2,
+  dplyr::select(scenario, current_suitable_km2, future_suitable_km2,
          gain_km2, loss_km2, net_change_km2, pct_change) %>%
   mutate(across(where(is.numeric), ~ round(., 0)))
 ```

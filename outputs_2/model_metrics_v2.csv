@@ -1,0 +1,8 @@
+Metric,Value
+AUC,0.9144
+TSS,0.7166
+Kappa,0.2933
+Sensitivity (MaxSS),0.8368
+Specificity (MaxSS),0.8798
+Mean suitability at occurrences,0.682
+Primary threshold (MaxSS),0.2138

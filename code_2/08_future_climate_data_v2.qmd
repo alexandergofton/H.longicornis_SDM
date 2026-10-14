@@ -2,7 +2,24 @@
 title: "Step 8: Future Climate Data"
 author: "Alexander W. Gofton"
 date: today
-format: gfm
+format:
+  gfm:
+    toc: true
+    toc-depth: 3
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme:
+      light: cosmo
+      dark: darkly
+execute:
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    results: hold
 ---
 
 ## Overview
@@ -335,28 +352,53 @@ precipitation changes relative to current conditions.
 #| fig-height: 6
 
 # Sample the current and future bio1 values across Aus/NZ
-set.seed(99)
-sample_cells <- spatSample(env_current[["bio1"]], size = 5000,
-                           method = "random", na.rm = TRUE, xy = TRUE)
-current_bio1 <- sample_cells$bio1
+# Use the correct layer name from env_current
+bio1_name <- worldclim_vars[grepl(
+  "^bio.?1$|bio1",
+  worldclim_vars,
+  ignore.case = TRUE
+)][1]
+
+set.seed(7990)
+sample_cells <- spatSample(
+  env_current[[bio1_name]],
+  size = 5000,
+  method = "random",
+  na.rm = TRUE,
+  xy = TRUE
+)
+current_bio1 <- sample_cells[[bio1_name]]
 
 # Sample future bio1 for each scenario
 future_bio1_data <- list()
-future_bio1_data[["Current"]] <- tibble(bio1 = current_bio1, scenario = "Current")
+future_bio1_data[["Current"]] <- tibble(
+  bio1 = current_bio1,
+  scenario = "Current"
+)
 
 for (i in seq_len(nrow(scenarios))) {
-  scenario_id <- sprintf("%s_ssp%s_%s", scenarios$gcm[i], scenarios$ssp[i],
-                         scenarios$period[i])
+  scenario_id <- sprintf(
+    "%s_ssp%s_%s",
+    scenarios$gcm[i],
+    scenarios$ssp[i],
+    scenarios$period[i]
+  )
   final_file <- file.path(future_dir, paste0(scenario_id, "_all_selected.tif"))
 
   if (file.exists(final_file)) {
     future_stack <- rast(final_file)
-    future_vals <- extract(future_stack[["bio1"]],
-                           sample_cells[, c("x", "y")])$bio1
+    future_vals <- extract(
+      future_stack[[bio1_name]],
+      sample_cells[, c("x", "y")]
+    )[[bio1_name]]
     future_bio1_data[[scenario_id]] <- tibble(
       bio1 = future_vals,
-      scenario = sprintf("%s SSP%s %s",
-                         scenarios$gcm[i], scenarios$ssp[i], scenarios$period[i])
+      scenario = sprintf(
+        "%s SSP%s %s",
+        scenarios$gcm[i],
+        scenarios$ssp[i],
+        scenarios$period[i]
+      )
     )
   }
 }
@@ -367,13 +409,19 @@ ggplot(bio1_comparison, aes(x = bio1, fill = scenario)) +
   geom_density(alpha = 0.3) +
   labs(
     title = "Annual mean temperature (BIO1) distribution — current vs. future",
-    x = "BIO1 (°C)", y = "Density", fill = "Scenario"
+    x = "BIO1 (°C)",
+    y = "Density",
+    fill = "Scenario"
   ) +
   theme_minimal(base_size = 11) +
   theme(legend.position = "right", legend.text = element_text(size = 7))
 
-ggsave(file.path(figures_dir, "08_future_climate_comparison.png"),
-       width = 10, height = 6, dpi = 300)
+ggsave(
+  file.path(figures_dir, "08_future_climate_comparison.png"),
+  width = 10,
+  height = 6,
+  dpi = 300
+)
 ```
 
 

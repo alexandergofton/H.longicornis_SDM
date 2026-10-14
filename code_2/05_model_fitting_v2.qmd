@@ -14,7 +14,7 @@ format:
 execute:
   warning: false
   message: false
-  cache: true
+  cache: false
 knitr:
   opts_chunk:
     results: hold

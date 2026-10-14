@@ -1,0 +1,7 @@
+set,vars,max_abs_r,max_vif
+S0_current,"bio2, bio3, bio13, aridity_idx, vpd_annual",0.6899037591596535,2.029608659273055
+S1_limits,"bio5, bio6, bio13, bio17, aridity_idx",0.7148524200863692,2.7475340561455153
+S2_means,"bio1, bio2, bio12, bio15, aridity_idx",0.7249798074121171,2.88751032801022
+S3_limits_dr,"bio2, bio5, bio6, bio13, aridity_idx",0.7148524200863692,2.8291766546225494
+S4_vpd,"vpd_annual, bio4, bio13, bio17, aridity_idx",0.6755958802603009,2.960231639246119
+S5_seasonal,"bio5, bio6, bio12, bio15, aridity_idx",0.7148524200863692,3.1275531207417706

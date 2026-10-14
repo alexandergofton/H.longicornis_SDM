@@ -1,0 +1,1384 @@
+---
+title: "Climatic suitability of Australia and New Zealand for the Asian longhorned tick, *Haemaphysalis longicornis*, under current climate"
+subtitle: "A transferable, bias-corrected species distribution model calibrated across the native and invaded ranges"
+author:
+  - name: "Alexander W. Gofton"
+    affiliation: "CSIRO"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-dpi: 150
+    css: manuscript.css
+    df-print: kable
+execute:
+  warning: false
+  message: false
+  cache: false
+bibliography: references.bib
+link-citations: true
+crossref:
+  custom:
+    - kind: float
+      key: suppfig
+      reference-prefix: "Figure S"
+      caption-prefix: "Figure S"
+      space-before-numbering: false
+    - kind: float
+      key: supptbl
+      reference-prefix: "Table S"
+      caption-prefix: "Table S"
+      space-before-numbering: false
+---
+
+::: {.callout-note collapse="true"}
+## Guide to figures and tables
+
+Figures and tables proposed for the **main text** of a publication are boxed in
+<span style="color:#1b7837;font-weight:700">green</span> and numbered Figure 1, 2, ... / Table 1, 2, ....
+**Supplementary** figures and tables are boxed in <span style="color:#666;font-weight:700">grey</span>,
+numbered Figure S1, S2, ... / Table S1, S2, ..., and collected in the Supplementary Material section.
+All code is embedded; click **Show code** to expand any chunk, or use the **Code** menu (top right) to
+show all code at once.
+
+| Main text | Supplementary |
+|---|---|
+| @fig-occ Occurrence records, accessible area and calibration regions | @suppfig-cor Predictor collinearity across the accessible area |
+| @fig-response Variable importance and response curves | @suppfig-bias Target-group sampling-bias surface |
+| @fig-suit Current climatic suitability for Australia and New Zealand | @suppfig-envdens Presence vs. background environments by region |
+| @fig-niche Niche dynamics between native and invaded ranges | @suppfig-tuning Model tuning across feature classes and regularisation |
+| @fig-limit Limiting factors and surveillance gaps | @suppfig-global Predicted suitability across the calibration area |
+| @tbl-perf Model evaluation summary | @suppfig-mess Extrapolation (MESS) and most dissimilar variable |
+| @tbl-area Suitable area by jurisdiction | @suppfig-boot Bootstrap uncertainty in predicted suitability |
+| | @suppfig-nichetests Niche equivalency and similarity tests |
+| | @suppfig-sens Sensitivity to background design |
+| | @supptbl-occ, @supptbl-sets, @supptbl-folds, @supptbl-thr, @supptbl-niche |
+:::
+
+# Abstract {.unnumbered}
+
+::: {.abstract-box}
+**Aim.** The Asian longhorned tick, *Haemaphysalis longicornis*, is a vector of pathogens of
+veterinary and public-health importance and has been invasive in Australia and New Zealand for more
+than a century. We estimated current climatic suitability for the species across both countries
+using a model selected explicitly for its ability to transfer between regions.
+
+**Location.** Global calibration across the native range (East Asia) and invaded ranges (North
+America and Oceania); projection to Australia and New Zealand.
+
+**Methods.** We modelled 389 spatially thinned, regionally stratified occurrence records with
+MaxEnt. To correct for strongly uneven sampling effort, we used a target-group background
+normalised within each region and allocated among regions in proportion to area. Ten *a priori*
+predictor sets and their MaxEnt settings were evaluated by leave-one-region-out (LORO) and
+spatial-block cross-validation, prioritising low omission of withheld records. The selected
+configurations of the three best-performing predictor sets were combined into a consensus model. We
+mapped suitability, extrapolation, bootstrap uncertainty, limiting factors and suitable areas far
+from known records, and compared climatic niches between ranges with ecospat.
+
+**Results.** Only predictor sets containing annual mean temperature transferred reliably between
+regions. A set derived by automated variance-inflation-factor (VIF) selection, which lacked an
+absolute temperature variable, ranked sites well within a withheld region but under-predicted
+suitability there: when Oceania was withheld, it omitted every Oceanian record. The consensus model transferred well
+(mean LORO AUC = 0.86, continuous Boyce index = 0.81). Trained without any Oceanian records, it
+predicted the Australian and New Zealand distribution well (AUC = 0.91, Boyce = 0.94). Suitable
+climate covers about 669,000 km² (8.3% of the two countries): the eastern Australian seaboard from
+south-east Queensland to Victoria, Tasmania, a small area of south-western Western Australia and
+almost all of New Zealand. Aridity and large diurnal temperature ranges limit the species inland;
+high temperatures limit it in the north. About 208,000 km² of suitable climate lies more than 100 km
+from any known record, mostly in Tasmania, the South Island of New Zealand and western Victoria.
+The Oceanian niche was equivalent to, and more similar than expected to, the native niche
+(Schoener's *D* = 0.47). The recently invaded North American range occupies a small fraction of the
+native niche (unfilling = 0.96).
+
+**Main conclusions.** The climatic niche of *H. longicornis* has been conserved during invasion of
+Australia and New Zealand, so native-range information transfers well to these countries, provided
+models include an absolute temperature gradient and correct for regional sampling imbalance.
+Climatically suitable but unrecorded areas, particularly Tasmania and southern New Zealand, are
+priorities for targeted surveillance.
+:::
+
+**Keywords:** *Haemaphysalis longicornis*; Asian longhorned tick; species distribution model; MaxEnt; model transferability; niche shift; biosecurity; Australia; New Zealand
+
+```{r}
+#| label: setup
+#| cache: false
+#| code-summary: "Show code: packages, paths and helpers"
+
+options(java.parameters = "-Xmx12g")   # must be set before rJava starts
+suppressPackageStartupMessages({
+  library(dismo)          # MaxEnt (maxent.jar) interface; loads raster
+  library(terra)
+  library(sf)
+  library(predicts)       # MESS
+  library(ecospat)        # Boyce index, niche overlap / dynamics
+  library(ade4)           # PCA for niche analyses
+  library(rnaturalearth)
+  library(tidyterra)
+  library(patchwork)
+  library(parallel)
+  library(knitr)
+  library(tidyverse)      # loaded last so dplyr verbs take precedence
+})
+sf_use_s2(FALSE)
+
+base_dir <- normalizePath("..")                      # project root (this file lives in code_3/)
+proc_v2  <- file.path(base_dir, "processed_data_2")  # upstream inputs (Steps 1-4 of the pipeline)
+proc_v3  <- file.path(base_dir, "processed_data_3")  # outputs of this analysis
+out_dir  <- file.path(base_dir, "outputs_3")
+fig_dir  <- file.path(base_dir, "figures_3")
+for (d in c(proc_v3, out_dir, fig_dir)) dir.create(d, showWarnings = FALSE)
+terraOptions(memfrac = 0.6, tempdir = file.path(base_dir, "temp"), progress = 0)
+
+theme_set(theme_minimal(base_size = 11) + theme(panel.grid.minor = element_blank()))
+regs    <- c("East_Asia", "North_America", "Oceania")
+reg_lab <- c(East_Asia = "East Asia (native)", North_America = "North America (invaded)",
+             Oceania = "Oceania (invaded)")
+reg_col <- c(East_Asia = "#D55E00", North_America = "#0072B2", Oceania = "#009E73")
+var_lab <- c(bio1 = "Annual mean temperature (°C)", bio2 = "Mean diurnal range (°C)",
+             bio3 = "Isothermality (%)", bio4 = "Temperature seasonality",
+             bio5 = "Max temp. warmest month (°C)", bio6 = "Min temp. coldest month (°C)",
+             bio7 = "Temperature annual range (°C)", bio10 = "Mean temp. warmest quarter (°C)",
+             bio11 = "Mean temp. coldest quarter (°C)", bio12 = "Annual precipitation (mm)",
+             bio13 = "Precip. wettest month (mm)", bio14 = "Precip. driest month (mm)",
+             bio15 = "Precipitation seasonality (CV)", bio16 = "Precip. wettest quarter (mm)",
+             bio17 = "Precip. driest quarter (mm)", pet_idx = "Annual PET (mm)",
+             aridity_idx = "Thornthwaite aridity index", cmi_idx = "Climatic moisture index",
+             vpd_annual = "Mean annual VPD (hPa)")
+save_fig <- function(name, p = last_plot(), w = 8, h = 6)
+  ggsave(file.path(fig_dir, paste0(name, ".png")), p, width = w, height = h, dpi = 300, bg = "white")
+fmt <- function(x, d = 2) formatC(x, format = "f", digits = d)
+fmt_int <- function(x) format(round(x), big.mark = ",")
+```
+
+# Introduction
+
+The Asian longhorned tick, *Haemaphysalis longicornis* Neumann, is a three-host ixodid tick native
+to temperate East Asia: eastern China, the Korean Peninsula, Japan and the Russian Far East
+[@hoogstraal1968; @zhao2020]. It parasitises a wide range of mammals and birds and is of
+considerable veterinary and public-health importance. It transmits *Theileria orientalis*,
+including the Ikeda genotype responsible for outbreaks of oriental theileriosis in Australian cattle
+[@kamau2011], and in East Asia it is a principal vector of severe fever with thrombocytopenia
+syndrome virus [@yu2011] and many other pathogens [@zhao2020]. The species exists as bisexual and
+parthenogenetic populations. Because a single parthenogenetic female can found a population, the
+parthenogenetic form has spread far beyond the native range [@hoogstraal1968]. It has long been
+established in eastern Australia, New Zealand and several south-west Pacific islands, where it is
+an important pest of livestock [@heath2016]. Since its detection in New Jersey in 2017 it has spread
+rapidly across the eastern United States [@rainey2018].
+
+Correlative species distribution models (SDMs) are the main tool for estimating where an invasive
+species could establish, and several have been developed for *H. longicornis*, mostly to forecast
+its spread in North America [@raghavan2019; @rochlin2019; @namgyal2020]. Using such models to
+predict suitability in an invaded region raises three well-known problems. First, presence-only
+records reflect sampling effort as much as occurrence, and uncorrected sampling bias distorts both
+fitted responses and predicted distributions [@phillips2009]. Second, a model is only useful for
+an invaded region if the species–climate relationship it learns transfers across space. This is
+not guaranteed when invaded populations occupy climates not used in the native range (niche
+expansion) or fail to occupy climates used there (unfilling) [@guisan2014; @petitpierre2012].
+Third, complex models and automated variable selection can produce over-fitted response surfaces
+that interpolate well but extrapolate poorly [@radosavljevic2014; @elith2010; @owens2013].
+Despite this, transferability is rarely evaluated directly, and most SDMs are assessed with random
+or spatial cross-validation within the calibration area [@wenger2012; @roberts2017].
+
+*H. longicornis* is a good case for addressing these issues. It has been recorded across three
+continents spanning both hemispheres, which allows transfer to be tested explicitly by withholding
+entire regions. The Australian and New Zealand populations are long-established, and the species'
+distribution there is reasonably well documented, which provides a strong test of whether a
+globally calibrated model reproduces a known invaded range. For Australia and New Zealand, the
+practical questions are where climate currently permits the tick to persist, which climatic factors
+limit its spread inland and northward, and which climatically suitable areas lack records and so
+merit surveillance.
+
+Here we develop a MaxEnt model for *H. longicornis* calibrated across its native and invaded ranges
+and use it to map current climatic suitability across Australia and New Zealand. Our specific aims
+were to: (i) correct for strongly uneven sampling effort among regions using a region-balanced
+target-group background; (ii) select predictors and model complexity explicitly for transferability
+among regions; (iii) map current suitability, extrapolation risk, uncertainty and limiting climatic
+factors across Australia and New Zealand; (iv) quantify niche overlap and niche dynamics between the
+native and invaded ranges; and (v) identify suitable but unrecorded areas as candidate targets for
+surveillance.
+
+# Methods
+
+## Occurrence data
+
+Occurrence records of *H. longicornis* were compiled from the Global Biodiversity Information
+Facility (GBIF), the Atlas of Living Australia (ALA), a global literature compilation of North
+American and Pacific records [@rochlin2019] and a georeferenced dataset of ticks in China
+[@zhang2019]. Records without coordinates and duplicate localities were removed and the remaining
+records were spatially thinned to a minimum inter-record distance of 10 km to reduce spatial
+autocorrelation. Because East Asian records dominated the thinned dataset (61%), records were then
+geographically stratified so that no single region contributed more than 35% of records (random
+subsampling of the over-represented region only). Each record was assigned to a calibration region:
+East Asia (native range; China, Japan, the Korean Peninsula, the Russian Far East, plus a single
+Himalayan record), North America (invaded; eastern USA) or Oceania (invaded; Australia, New
+Zealand and Pacific islands). These upstream steps are implemented in Steps 1–2 of the analysis
+pipeline (`code_2/`), and the resulting dataset is the starting point here.
+
+```{r}
+#| label: load-occ
+occ <- read_csv(file.path(proc_v2, "occurrences_with_climate.csv"), show_col_types = FALSE) |>
+  mutate(region = if_else(region == "Other", "East_Asia", region))   # Himalayan record -> native range
+
+world10 <- ne_countries(scale = 10, returnclass = "sf")
+occ_sf  <- st_as_sf(occ, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+occ$country <- world10$admin[st_nearest_feature(occ_sf, world10)]
+
+# All available environmental layers (WorldClim 2.1 bioclim, ENVIREM, CHELSA VPD), 2.5 arcmin
+env_all <- rast(file.path(proc_v2, "env_all_global.tif"))
+cand_vars <- c(paste0("bio", c(1:7, 10:17)), "pet_idx", "aridity_idx", "cmi_idx", "vpd_annual")
+n_occ <- nrow(occ); n_by_reg <- table(occ$region)
+```
+
+## Environmental predictors
+
+Candidate predictors were the WorldClim 2.1 bioclimatic variables at 2.5 arc-minute resolution
+[@fick2017], three ENVIREM moisture variables (annual potential evapotranspiration, Thornthwaite
+aridity index and climatic moisture index) [@title2018], and mean annual vapour-pressure deficit
+(VPD) from CHELSA v2.1 (1981–2010), aggregated from 30 arc-seconds to the WorldClim grid
+[@karger2017]. BIO8, BIO9, BIO18 and BIO19 were excluded a priori because they combine temperature
+and precipitation quarters and produce known spatial discontinuities, leaving
+`r length(cand_vars)` candidate variables.
+
+## Accessible area and background
+
+The accessible area (*M*) [@barve2011] was defined as the union of 1,000-km buffers around all
+occurrence records, clipped to land. This encompasses the areas plausibly reachable through
+livestock movement, wildlife hosts and migratory birds, while excluding the distant and
+environmentally irrelevant regions that inflate discrimination metrics. *M* was partitioned into the
+three calibration regions by assigning each grid cell to the region of its nearest occurrence record.
+
+Presence records of *H. longicornis* reflect where people have looked for ticks as much as where the
+tick occurs. To account for this we used a target-group background [@phillips2009]. Target-group
+records comprised all georeferenced Ixodidae records on GBIF within *M* plus the tick survey records
+of @zhang2019, de-duplicated at 0.1°. Because GBIF tick records are overwhelmingly North American,
+a single global sampling-effort surface would place almost all background points in North America.
+We therefore (i) built the sampling-effort surface separately within each region, using a Gaussian
+kernel (σ = 1°, about 100 km) on 0.25° record counts, normalised to a maximum of 1 within each region
+with a floor of 0.02 so that unsurveyed areas remain available; and (ii) allocated the 10,000
+background points among regions in proportion to each region's land area within *M*. Within regions,
+points were drawn with probability proportional to sampling effort × cell area. A second,
+independent set of 10,000 points was drawn uniformly (area-weighted) across *M* and used only for
+model evaluation, so that all candidate models were evaluated against a common reference
+distribution of available environments.
+
+```{r}
+#| label: accessible-area-background
+M_r <- rast(file.path(proc_v2, "env_selected_M.tif"))[[1]]
+M_r <- classify(!is.na(M_r), cbind(0, NA)); names(M_r) <- "M"
+
+# Region membership of each M cell (nearest occurrence), computed at 0.25 deg then disaggregated
+M6  <- aggregate(M_r, 6, fun = "max", na.rm = TRUE)
+xy6 <- as.data.frame(M6, xy = TRUE, na.rm = TRUE)[, 1:2]
+reg6 <- match(occ$region[st_nearest_feature(st_as_sf(xy6, coords = c("x", "y"), crs = 4326), occ_sf)], regs)
+reg_r6 <- rast(M6); reg_r6[cellFromXY(reg_r6, as.matrix(xy6))] <- reg6
+reg_r  <- mask(resample(reg_r6, M_r, method = "near"), M_r); names(reg_r) <- "region"
+
+cells  <- which(!is.na(values(reg_r)))
+c_reg  <- values(reg_r)[cells]
+c_area <- values(cellSize(reg_r, unit = "km"))[cells]
+reg_area  <- tapply(c_area, c_reg, sum)
+reg_share <- reg_area / sum(reg_area)
+n_bg  <- 10000
+n_reg <- round(n_bg * reg_share)
+
+# Target-group records (GBIF Ixodidae within M + Zhang et al. 2019 Chinese tick records)
+tg_gbif  <- read_csv(file.path(proc_v2, "ixodidae_points.csv"), show_col_types = FALSE)
+tg_zhang <- read_csv(file.path(base_dir, "data", "Zhang_et_al_2019_ms_dataset_v1.csv"),
+                     show_col_types = FALSE) |> filter(!is.na(lon), !is.na(lat)) |> dplyr::select(lon, lat)
+tg <- bind_rows(tg_gbif, tg_zhang) |>
+  mutate(lon_b = round(lon, 1), lat_b = round(lat, 1)) |>
+  distinct(lon_b, lat_b, .keep_all = TRUE) |> dplyr::select(lon, lat)
+tg$region <- occ$region[st_nearest_feature(st_as_sf(tg, coords = c("lon", "lat"), crs = 4326), occ_sf)]
+
+# Region-normalised kernel sampling-effort surface
+tg_cnt <- rasterize(as.matrix(tg[, c("lon", "lat")]), M6, fun = "count", background = 0)
+tg_kde <- focal(tg_cnt, focalMat(tg_cnt, 1, "Gauss"), fun = "sum", na.rm = TRUE)
+tg_kde <- resample(tg_kde, M_r, method = "bilinear")
+kv <- values(tg_kde)[cells]; kv[is.na(kv)] <- 0
+bias <- numeric(length(cells))
+for (r in seq_along(regs)) { i <- c_reg == r; bias[i] <- pmax(kv[i] / max(kv[i]), 0.02) }
+bias_r <- rast(reg_r); bias_r[cells] <- bias; names(bias_r) <- "bias"
+
+sample_bg <- function(prob, seed) {
+  set.seed(seed)
+  idx <- unlist(lapply(seq_along(regs), function(r) {
+    i <- which(c_reg == r); sample(i, n_reg[r], prob = prob[i] * c_area[i]) }))
+  xy <- xyFromCell(reg_r, cells[idx])
+  bind_cols(tibble(lon = xy[, 1], lat = xy[, 2], region = regs[c_reg[idx]]),
+            terra::extract(env_all, xy)) |> drop_na(all_of(cand_vars))
+}
+bg_train   <- sample_bg(bias, 102)                       # bias-corrected training background
+bg_uniform <- sample_bg(rep(1, length(cells)), 101)      # uniform background (sensitivity analysis)
+bg_eval    <- sample_bg(rep(1, length(cells)), 999)      # independent evaluation background
+
+writeRaster(bias_r, file.path(proc_v3, "bias_surface_regional.tif"), overwrite = TRUE)
+write_csv(bg_train, file.path(proc_v3, "background_train.csv"))
+write_csv(bg_eval,  file.path(proc_v3, "background_eval.csv"))
+```
+
+## Variable selection
+
+Collinearity was assessed across the accessible area (on the evaluation background), not at
+occurrence points, because collinearity among predictors in the environments available to the
+species is what affects coefficient estimation and transfer [@dormann2013]. Rather than relying on
+automated stepwise variance-inflation-factor (VIF) elimination, which can discard ecologically
+critical variables, we defined ten candidate predictor sets *a priori*. Each set contained four or
+five variables spanning the axes known to constrain the off-host survival and development of
+ixodid ticks: thermal regime or thermal limits, temperature variability, moisture supply, and
+desiccation stress [@needham1991; @heath2016]. All sets satisfied |Spearman's ρ| ≤ 0.75 and VIF < 5
+across *M* (@supptbl-sets). Set A reproduces the predictors selected by stepwise VIF reduction in an
+earlier iteration of this analysis and contains no absolute temperature variable. Each candidate set
+was evaluated over a grid of MaxEnt settings (see below) and the set containing the best-ranked
+configurations were carried forward (see below).
+
+```{r}
+#| label: candidate-sets
+cand_sets <- list(
+  A = c("bio2", "bio3", "bio13", "aridity_idx", "vpd_annual"),
+  B = c("bio5", "bio6", "bio13", "bio17", "aridity_idx"),
+  C = c("bio1", "bio2", "bio12", "bio15", "aridity_idx"),
+  D = c("bio2", "bio5", "bio6", "bio13", "aridity_idx"),
+  E = c("vpd_annual", "bio4", "bio13", "bio17", "aridity_idx"),
+  F = c("bio5", "bio6", "bio12", "bio15", "aridity_idx"),
+  G = c("bio1", "bio2", "bio13", "bio17", "aridity_idx"),
+  H = c("bio1", "bio12", "bio15", "aridity_idx"),
+  I = c("bio10", "bio2", "bio12", "bio15", "aridity_idx"),
+  J = c("bio11", "bio2", "bio12", "bio15", "aridity_idx"))
+set_desc <- c(A = "Stepwise-VIF set (no absolute temperature)", B = "Thermal extremes + seasonal moisture",
+              C = "Mean temperature + annual moisture", D = "Thermal extremes + diurnal range",
+              E = "Evaporative demand (VPD)", F = "Thermal extremes + annual moisture",
+              G = "Mean temperature + seasonal moisture extremes", H = "Minimal (no diurnal range)",
+              I = "Summer temperature", J = "Winter temperature")
+cor_bg <- cor(bg_eval[, cand_vars], method = "spearman")
+set_coll <- imap_dfr(cand_sets, function(v, nm) {
+  cm <- abs(cor_bg[v, v]); diag(cm) <- 0
+  tibble(set = nm, description = set_desc[nm], variables = paste(v, collapse = ", "),
+         max_abs_rho = max(cm), max_VIF = max(usdm::vif(as.data.frame(bg_eval[, v]))$VIF))
+})
+```
+
+## Model calibration, evaluation and selection
+
+Models were fitted with MaxEnt 3.4 [@phillips2006; @phillips2017] through `dismo`, with clamping
+enabled, threshold features disabled and complementary log-log (cloglog) output. Because the aim is
+to predict suitability in a region where the species is invasive, models were evaluated primarily
+on **transferability** [@wenger2012; @roberts2017], using two spatially structured
+cross-validation schemes:
+
+1. **Leave-one-region-out (LORO):** models were trained on two regions and tested on the third
+   (East Asia, North America, Oceania). This is the most direct test of the task of interest,
+   predicting suitability in a region from which no records were used.
+2. **Spatial block cross-validation:** 5° × 5° blocks were randomly assigned to five folds, so
+   training and test data were spatially separated within regions.
+
+In each fold, training background points falling in the test region or blocks were withheld.
+Test presences were contrasted with evaluation-background points from the same test region or
+blocks. Discrimination within the test area was measured by the area under the ROC curve (AUC).
+Calibration of the predicted presence/expected ratio was measured by the continuous Boyce index
+(CBI) [@hirzel2006]. Over-fitting and transfer failure were measured by the omission rate of test
+presences at the 10th-percentile training-presence threshold (OR10; expected value 0.10)
+[@radosavljevic2014]. Configurations were selected with sequential criteria that prioritise
+omission, following @radosavljevic2014 and @kass2021. First, we retained configurations with mean
+LORO OR10 ≤ 0.30 and mean block OR10 ≤ 0.20. These bounds allow transferred models up to three times,
+and within-region models up to twice, the expected omission of 0.10. Discrimination metrics alone
+can be misleading under transfer: a model can rank sites correctly within a withheld region
+(high AUC) while predicting uniformly low suitability there, and so omit almost all records at any
+threshold calibrated on the training data. Second, the retained configurations were ranked on mean
+AUC and CBI under each scheme, and the configuration with the lowest rank sum was selected.
+The three top-ranked predictor sets were carried forward. For each, feature classes (L, LQ, LQH,
+LQHP) and regularisation multipliers (β = 0.5–8) were tuned over the full grid with the same
+criteria [@kass2021]. The top-ranked sets differed by small margins relative to the variation among
+folds, so rather than relying on a single predictor set we combined the selected configuration of
+each set into an unweighted consensus model (mean cloglog suitability of the three members). This
+propagates uncertainty in predictor choice into the predictions. The consensus was evaluated with
+exactly the same cross-validation folds, refitting all three members within each fold.
+
+```{r}
+#| label: cv-functions
+#| code-summary: "Show code: model fitting and cross-validation functions"
+fc_args <- function(fc) {
+  f <- strsplit(fc, "")[[1]]
+  c(paste0("linear=", "L" %in% f), paste0("quadratic=", "Q" %in% f), paste0("hinge=", "H" %in% f),
+    paste0("product=", "P" %in% f), "threshold=false", "autofeature=false")
+}
+fit_mx <- function(p, a, vars, fc, rm) {
+  x <- rbind(as.data.frame(p[, vars]), as.data.frame(a[, vars]))
+  dismo::maxent(x = x, p = c(rep(1, nrow(p)), rep(0, nrow(a))),
+                args = c(fc_args(fc), paste0("betamultiplier=", rm), "doclamp=true"))
+}
+pred_mx <- function(m, x, vars)
+  as.numeric(dismo::predict(m, as.data.frame(x[, vars]), args = "outputformat=cloglog"))
+auc_fun <- function(pp, pa) {             # Mann-Whitney AUC
+  r <- rank(c(pp, pa)); np <- length(pp)
+  (sum(r[seq_len(np)]) - np * (np + 1) / 2) / (np * length(pa)) }
+cbi_fun <- function(pp, pa)
+  tryCatch(ecospat.boyce(fit = c(pa, pp), obs = pp, nclass = 0, PEplot = FALSE)$cor, error = function(e) NA)
+
+# Spatial blocks: 5-degree cells randomly allocated to 5 folds
+blk_id <- function(lon, lat) paste(floor(lon / 5), floor(lat / 5))
+set.seed(2024)
+all_blk  <- unique(blk_id(c(occ$lon, bg_train$lon, bg_eval$lon, bg_uniform$lon),
+                          c(occ$lat, bg_train$lat, bg_eval$lat, bg_uniform$lat)))
+blk_fold <- setNames(sample(rep(1:5, length.out = length(all_blk))), all_blk)
+add_block <- function(x) mutate(x, block = unname(blk_fold[blk_id(lon, lat)]))
+occ <- add_block(occ); bg_train <- add_block(bg_train); bg_eval <- add_block(bg_eval)
+bg_uniform <- add_block(bg_uniform)
+
+run_cv <- function(vars, fc, rm, bg, scheme) {
+  folds <- if (scheme == "loro") regs else 1:5
+  ko <- if (scheme == "loro") occ$region else occ$block
+  kb <- if (scheme == "loro") bg$region else bg$block
+  ke <- if (scheme == "loro") bg_eval$region else bg_eval$block
+  map_dfr(folds, function(k) {
+    tr <- occ[ko != k, ]; te <- occ[ko == k, ]
+    m  <- fit_mx(tr, bg[kb != k, ], vars, fc, rm)
+    pp <- pred_mx(m, te, vars); pe <- pred_mx(m, bg_eval[ke == k, ], vars)
+    thr <- quantile(pred_mx(m, tr, vars), 0.10)
+    tibble(scheme = scheme, fold = as.character(k), n_test = nrow(te),
+           auc = auc_fun(pp, pe), cbi = cbi_fun(pp, pe), or10 = mean(pp < thr))
+  })
+}
+cv_summary <- function(cv) {
+  l <- filter(cv, scheme == "loro"); b <- filter(cv, scheme == "block")
+  tibble(loro_auc = mean(l$auc), loro_cbi = mean(l$cbi, na.rm = TRUE), loro_or10 = mean(l$or10),
+         blk_auc = mean(b$auc), blk_cbi = mean(b$cbi, na.rm = TRUE), blk_or10 = mean(b$or10))
+}
+# Sequential selection: omission filter first, then rank sum of discrimination / calibration metrics
+select_config <- function(d, max_or_loro = 0.30, max_or_blk = 0.20) {
+  pass <- filter(d, loro_or10 <= max_or_loro, blk_or10 <= max_or_blk)
+  if (nrow(pass) == 0) pass <- slice_min(d, loro_or10, n = 1)    # fallback: lowest transfer omission
+  pass |> mutate(rank_sum = rank(-loro_auc) + rank(-loro_cbi) + rank(-blk_auc) + rank(-blk_cbi)) |>
+    arrange(rank_sum)
+}
+# Consensus helpers: members = list of list(set, vars, fc, rm)
+fit_ens  <- function(p, a, members) lapply(members, function(cf) fit_mx(p, a, cf$vars, cf$fc, cf$rm))
+ens_pred_df <- function(ms, x) rowMeans(sapply(seq_along(ms), function(i) pred_mx(ms[[i]], x, members[[i]]$vars)))
+ens_pred_rast <- function(ms, r) mean(rast(lapply(seq_along(ms), function(i)
+  predict(r[[members[[i]]$vars]], ms[[i]], args = "outputformat=cloglog", na.rm = TRUE))))
+run_cv_ens <- function(bg, scheme) {
+  folds <- if (scheme == "loro") regs else 1:5
+  ko <- if (scheme == "loro") occ$region else occ$block
+  kb <- if (scheme == "loro") bg$region else bg$block
+  ke <- if (scheme == "loro") bg_eval$region else bg_eval$block
+  map_dfr(folds, function(k) {
+    tr <- occ[ko != k, ]; te <- occ[ko == k, ]
+    ms <- fit_ens(tr, bg[kb != k, ], members)
+    pp <- ens_pred_df(ms, te); pe <- ens_pred_df(ms, bg_eval[ke == k, ])
+    thr <- quantile(ens_pred_df(ms, tr), 0.10)
+    tibble(scheme = scheme, fold = as.character(k), n_test = nrow(te),
+           auc = auc_fun(pp, pe), cbi = cbi_fun(pp, pe), or10 = mean(pp < thr))
+  })
+}
+run_grid <- function(grid, bg) {
+  cl <- makeCluster(min(7, detectCores() - 1))
+  on.exit(stopCluster(cl))
+  clusterEvalQ(cl, { options(java.parameters = "-Xmx1g")
+    suppressPackageStartupMessages({ library(dismo); library(ecospat); library(dplyr); library(purrr); library(tibble) })
+    NULL })
+  clusterExport(cl, c("fc_args", "fit_mx", "pred_mx", "auc_fun", "cbi_fun", "run_cv", "cv_summary",
+                      "occ", "bg_eval", "regs", "grid", "bg"), envir = environment())
+  bind_rows(parLapplyLB(cl, seq_len(nrow(grid)), function(i) {
+    g <- grid[i, ]; v <- g$vars[[1]]
+    cv <- bind_rows(run_cv(v, g$fc, g$rm, bg, "loro"), run_cv(v, g$fc, g$rm, bg, "block"))
+    bind_cols(dplyr::select(g, -vars), cv_summary(cv))
+  }))
+}
+```
+
+```{r}
+#| label: select-variable-set
+#| cache: true
+# Stage 1: compare candidate variable sets across a reduced tuning grid
+grid_sets <- expand_grid(set = names(cand_sets), fc = c("LQ", "LQH", "LQHP"), rm = c(1, 2, 4, 8)) |>
+  mutate(vars = cand_sets[set])
+set_res <- run_grid(grid_sets, bg_train) |> mutate(pass = loro_or10 <= 0.30 & blk_or10 <= 0.20)
+ranked_sets <- select_config(set_res)
+sel_sets <- head(unique(ranked_sets$set), 3)     # three top-ranked predictor sets
+# Best configuration per set: best-ranked passing configuration, or (if none pass) lowest transfer omission
+best_by_set <- bind_rows(
+  ranked_sets |> group_by(set) |> slice_min(rank_sum, n = 1, with_ties = FALSE),
+  set_res |> filter(!set %in% ranked_sets$set) |> group_by(set) |> slice_min(loro_or10, n = 1, with_ties = FALSE)) |>
+  ungroup() |> arrange(!pass, rank_sum, loro_or10)
+# Per-region transfer of the temperature-free set A in its best-discriminating configuration
+a_best <- set_res |> filter(set == "A") |>
+  mutate(r = rank(-loro_auc) + rank(-loro_cbi) + rank(-blk_auc) + rank(-blk_cbi)) |> slice_min(r, n = 1, with_ties = FALSE)
+cv_A <- run_cv(cand_sets$A, a_best$fc, a_best$rm, bg_train, "loro")
+write_csv(set_res, file.path(out_dir, "candidate_set_cv_grid.csv"))
+```
+
+```{r}
+#| label: tune-model
+#| cache: true
+# Stage 2: full tuning grid for each of the three top-ranked predictor sets
+grid_tune <- expand_grid(set = sel_sets, fc = c("L", "LQ", "LQH", "LQHP"), rm = c(0.5, 1, 2, 3, 4, 6, 8)) |>
+  mutate(vars = cand_sets[set])
+tune_all <- run_grid(grid_tune, bg_train)
+tune_sel <- map_dfr(sel_sets, ~ select_config(filter(tune_all, set == .x)) |> slice(1))
+members  <- pmap(tune_sel |> dplyr::select(set, fc, rm), function(set, fc, rm)
+  list(set = set, vars = cand_sets[[set]], fc = fc, rm = rm))
+names(members) <- sel_sets
+sel_vars <- unique(unlist(map(members, "vars")))          # union of predictors used by the consensus
+sel_vars <- cand_vars[cand_vars %in% sel_vars]
+write_csv(tune_all, file.path(out_dir, "tuning_cv_grid.csv"))
+```
+
+Each consensus member was refitted to all records. Variable importance was summarised as MaxEnt
+permutation importance of each member [@phillips2017]. Marginal response curves of the consensus
+were computed with the other predictors held at their median value across presence records.
+Uncertainty was quantified by refitting the model to 30 bootstrap resamples of the presence records
+(resampling within regions to preserve regional composition; all three members were refitted to each
+resample). We report the across-replicate 95%
+interval for response curves and the across-replicate standard deviation for mapped suitability.
+
+```{r}
+#| label: final-model
+#| cache: true
+m_final <- fit_ens(occ, bg_train, members)          # list of the three member models
+saveRDS(list(members = members, models = m_final), file.path(proc_v3, "final_consensus_models.rds"))
+
+var_imp <- imap_dfr(m_final, function(m, nm) {
+  v <- members[[nm]]$vars; r <- m@results
+  tibble(set = nm, variable = v, contribution = r[paste0(v, ".contribution"), 1],
+         permutation = r[paste0(v, ".permutation.importance"), 1]) })
+imp_order <- var_imp |> group_by(variable) |> summarise(mean_perm = sum(permutation) / length(members)) |>
+  arrange(desc(mean_perm))
+n_feat <- map_int(m_final, function(m) {
+  lam <- m@lambdas; lam <- lam[!grepl("^(linearPredictorNormalizer|densityNormalizer|numBackgroundPoints|entropy)", lam)]
+  sum(as.numeric(sapply(strsplit(lam, ","), `[`, 2)) != 0) })
+
+# Consensus cross-validation by fold (all members refitted within each fold)
+cv_final <- bind_rows(run_cv_ens(bg_train, "loro"), run_cv_ens(bg_train, "block"))
+cvs_final <- cv_summary(cv_final)
+write_csv(cv_final, file.path(out_dir, "final_model_cv_folds.csv"))
+
+# Thresholds and in-sample discrimination
+p_occ  <- ens_pred_df(m_final, occ)
+p_eval <- ens_pred_df(m_final, bg_eval)
+thr_p10 <- unname(quantile(p_occ, 0.10))
+ev <- dismo::evaluate(p = p_occ, a = p_eval)
+thr_mss <- ev@t[which.max(ev@TPR + ev@TNR)]
+insample <- tibble(region = regs) |>
+  mutate(auc = map_dbl(region, ~ auc_fun(p_occ[occ$region == .x], p_eval[bg_eval$region == .x])),
+         cbi = map_dbl(region, ~ cbi_fun(p_occ[occ$region == .x], p_eval[bg_eval$region == .x])),
+         pct_suitable = map_dbl(region, ~ 100 * mean(p_occ[occ$region == .x] >= thr_p10)))
+auc_all <- auc_fun(p_occ, p_eval); cbi_all <- cbi_fun(p_occ, p_eval)
+```
+
+```{r}
+#| label: bootstrap
+#| cache: true
+n_boot <- 30
+set.seed(31)
+boot_models <- map(seq_len(n_boot), function(b) {
+  idx <- unlist(lapply(regs, function(r) { i <- which(occ$region == r); i[sample.int(length(i), replace = TRUE)] }))
+  fit_ens(occ[idx, ], bg_train, members)
+})
+```
+
+## Projection to Australia and New Zealand
+
+The consensus model was projected onto Australia and New Zealand (110–180°E, 8–48°S, restricted to the
+land area of the two countries). Climatic suitability was converted to suitable/unsuitable using the
+10th-percentile training-presence threshold. This threshold is appropriate for presence-background
+data and tolerates a small proportion of erroneous or sink-population records [@liu2013]; the
+threshold maximising sensitivity + specificity against the evaluation background is reported for
+comparison. Extrapolation was assessed with the multivariate environmental similarity surface (MESS)
+and the most dissimilar variable [@elith2010], using presence and training-background environments
+as the reference. To identify the climatic factor constraining suitability in each grid cell, we
+computed limiting factors following @elith2010: for each predictor in turn, its value was set to the
+median across presence records and the predictor yielding the largest increase in suitability was
+taken as limiting.
+
+To identify candidate areas for surveillance, suitable cells were classified by their geodesic
+distance to the nearest known Oceanian record (training records plus all georeferenced ALA records).
+Suitable cells more than 100 km from any known record were designated as *suitable but unrecorded*.
+Areas were computed from true (latitude-dependent) cell areas and summarised by Australian
+state/territory and New Zealand island.
+
+```{r}
+#| label: projection
+aunz_poly <- world10 |> filter(admin %in% c("Australia", "New Zealand")) |> st_union() |> vect()
+env_au <- crop(env_all[[sel_vars]], ext(110, 180, -48, -8)) |> mask(aunz_poly)
+pred_cur <- ens_pred_rast(m_final, env_au)
+names(pred_cur) <- "suitability"
+writeRaster(pred_cur, file.path(proc_v3, "suitability_current_aunz.tif"), overwrite = TRUE)
+
+# Bootstrap prediction uncertainty
+boot_stack <- rast(lapply(boot_models, ens_pred_rast, r = env_au))
+boot_sd   <- app(boot_stack, sd)
+boot_bin  <- app(boot_stack >= thr_p10, mean)          # proportion of replicates predicting suitable
+names(boot_sd) <- "sd"; names(boot_bin) <- "agreement"
+writeRaster(boot_sd, file.path(proc_v3, "suitability_bootstrap_sd_aunz.tif"), overwrite = TRUE)
+
+# Extrapolation (MESS) relative to calibration environments
+ref_env <- bind_rows(occ[, sel_vars], bg_train[, sel_vars])
+mess_full <- predicts::mess(env_au, as.data.frame(ref_env), full = TRUE)
+mess_r <- mess_full[["mess"]]
+mod_r  <- which.min(mess_full[[paste0(sel_vars, "_mess")]]); mod_r <- mask(mod_r, mess_r < 0, maskvalues = 0)
+writeRaster(mess_r, file.path(proc_v3, "mess_current_aunz.tif"), overwrite = TRUE)
+
+# Limiting factors (Elith et al. 2010)
+gain <- rast(lapply(sel_vars, function(v) {
+  e2 <- env_au; e2[[v]] <- mask(init(e2[[v]], median(occ[[v]])), e2[[v]])
+  ens_pred_rast(m_final, e2) - pred_cur }))
+names(gain) <- sel_vars
+limit_r <- which.max(gain)
+
+# Binary suitability and surveillance gaps
+suit_bin <- pred_cur >= thr_p10
+ala <- read_csv(file.path(base_dir, "data", "ALA_occurence", "records-2026-02-04.csv"),
+                show_col_types = FALSE) |>
+  transmute(lon = decimalLongitude, lat = decimalLatitude) |> drop_na()
+known <- bind_rows(occ |> filter(region == "Oceania") |> dplyr::select(lon, lat), ala) |> distinct()
+dist_known <- distance(pred_cur, vect(known, geom = c("lon", "lat"), crs = "EPSG:4326")) / 1000
+dist_known <- mask(dist_known, pred_cur)
+gap_r <- ifel(suit_bin == 0, 0, ifel(dist_known <= 100, 1, 2))   # 0 unsuitable, 1 suitable near records, 2 gap
+
+# Jurisdictions (Australian states/territories; NZ islands)
+jur <- ne_states(country = c("Australia", "New Zealand"), returnclass = "sf") |>
+  mutate(jur = case_when(admin == "Australia" & name %in% c("Jervis Bay Territory", "Lord Howe Island", "Macquarie Island") ~ "Other territories",
+                         admin == "Australia" ~ name,
+                         region == "North Island" ~ "NZ North Island",
+                         region == "South Island" ~ "NZ South Island",
+                         TRUE ~ "NZ outlying islands")) |>
+  group_by(jur) |> summarise(geometry = st_union(geometry), .groups = "drop")
+jur_r  <- rasterize(vect(jur), pred_cur, field = "jur")
+carea  <- cellSize(pred_cur, unit = "km") |> mask(pred_cur)
+zone_area <- function(x) { z <- zonal(carea * x, jur_r, fun = "sum", na.rm = TRUE); setNames(z[[2]], z[[1]]) }
+area_tab <- tibble(jurisdiction = levels(jur_r)[[1]]$jur) |>
+  mutate(land_km2     = zone_area(carea > 0)[jurisdiction],
+         suitable_km2 = zone_area(suit_bin)[jurisdiction],
+         suitable_analog_km2 = zone_area(suit_bin * (mess_r >= 0))[jurisdiction],
+         gap_km2      = zone_area(gap_r == 2)[jurisdiction]) |>
+  filter(land_km2 > 1000) |>
+  mutate(pct_suitable = 100 * suitable_km2 / land_km2) |> arrange(desc(suitable_km2))
+write_csv(area_tab, file.path(out_dir, "suitable_area_by_jurisdiction.csv"))
+tot <- global(c(carea, carea * suit_bin, carea * (mess_r < 0), carea * (gap_r == 2)), "sum", na.rm = TRUE)[[1]]
+names(tot) <- c("land", "suitable", "novel", "gap")
+```
+
+## Niche comparison between native and invaded ranges
+
+To understand why transfer between regions succeeds or fails, we compared the realised climatic niche
+of the native range (East Asia) with each invaded range in a common environmental space
+[@broennimann2012; @dicola2017]. A principal component analysis (PCA) of the selected predictors
+was calibrated on the evaluation background across all three regions. Occurrence and background
+densities were estimated on a 100 × 100 grid of the first two axes. We calculated Schoener's *D*,
+niche equivalency and similarity tests (100 randomisations; similarity with the native niche held
+fixed) [@warren2008], and the niche dynamics indices of stability, expansion and unfilling
+calculated in climates shared by both ranges (intersection = 0.1) [@guisan2014].
+
+```{r}
+#| label: niche
+#| cache: true
+pca <- dudi.pca(bg_eval[, sel_vars], scannf = FALSE, nf = 2)
+sc_bg  <- pca$li
+sc_occ <- suprow(pca, occ[, sel_vars])$li
+grid_z <- function(r) ecospat.grid.clim.dyn(glob = sc_bg, glob1 = sc_bg[bg_eval$region == r, ],
+                                          sp = sc_occ[occ$region == r, ], R = 100, th.sp = 0, th.env = 0)
+z <- setNames(lapply(regs, grid_z), regs)
+niche_cmp <- function(nat, inv) {
+  set.seed(7)
+  eq  <- ecospat.niche.equivalency.test(z[[nat]], z[[inv]], rep = 100, overlap.alternative = "lower", ncores = 1)
+  sim <- ecospat.niche.similarity.test(z[[nat]], z[[inv]], rep = 100, rand.type = 2, ncores = 1)
+  dyn <- ecospat.niche.dyn.index(z[[nat]], z[[inv]], intersection = 0.1)$dynamic.index.w
+  list(eq = eq, sim = sim,
+       tab = tibble(comparison = paste(reg_lab[nat], "vs", reg_lab[inv]),
+                    D = ecospat.niche.overlap(z[[nat]], z[[inv]], cor = TRUE)$D,
+                    p_equivalency = eq$p.D, p_similarity = sim$p.D,
+                    stability = dyn[["stability"]], expansion = dyn[["expansion"]], unfilling = dyn[["unfilling"]]))
+}
+nc_oc <- niche_cmp("East_Asia", "Oceania")
+nc_na <- niche_cmp("East_Asia", "North_America")
+niche_tab <- bind_rows(nc_oc$tab, nc_na$tab)
+write_csv(niche_tab, file.path(out_dir, "niche_comparison.csv"))
+```
+
+## Sensitivity analysis
+
+To test whether conclusions depended on the sampling-bias correction, the consensus members were
+refitted with a background drawn uniformly across *M* (same regional allocation, no target-group
+weighting), and its cross-validated performance and Australian/New Zealand predictions were compared
+with those of the final model.
+
+```{r}
+#| label: sensitivity
+m_unif <- fit_ens(occ, bg_uniform, members)
+cv_unif <- bind_rows(run_cv_ens(bg_uniform, "loro"), run_cv_ens(bg_uniform, "block"))
+pred_unif <- ens_pred_rast(m_unif, env_au)
+thr_unif  <- quantile(ens_pred_df(m_unif, occ), 0.10)
+sens_vals <- na.omit(cbind(values(pred_cur), values(pred_unif)))
+sens_cor  <- cor(sens_vals[, 1], sens_vals[, 2], method = "spearman")
+bin_agree <- mean((sens_vals[, 1] >= thr_p10) == (sens_vals[, 2] >= thr_unif))
+```
+
+All analyses were run in R `r paste(R.version$major, R.version$minor, sep = ".")` using `terra`,
+`sf`, `dismo` `r packageVersion("dismo")` (bundled MaxEnt 3.4 Java executable), `predicts`, `ecospat` and the `tidyverse`.
+
+# Results
+
+## Occurrence data and calibration environments
+
+The final dataset comprised `r n_occ` thinned records: `r n_by_reg[["East_Asia"]]` from the native
+East Asian range, `r n_by_reg[["North_America"]]` from North America and `r n_by_reg[["Oceania"]]`
+from Oceania (@fig-occ; @supptbl-occ). The accessible area covered
+`r fmt_int(sum(reg_area)/1e6)` million km² of land, of which East Asia, North America and Oceania
+made up `r fmt(100*reg_share[1],0)`%, `r fmt(100*reg_share[2],0)`% and `r fmt(100*reg_share[3],0)`%,
+respectively. The `r fmt_int(nrow(tg))` de-duplicated target-group tick records were
+strongly concentrated in North America (`r fmt(100*mean(tg$region=="North_America"),0)`%),
+confirming the need for region-specific normalisation of the sampling-effort surface
+(@suppfig-bias). Presence records occupied a subset of the available environments in each region,
+generally the warmer, wetter and less arid portion of *M* (@suppfig-envdens).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-occ
+#| fig-cap: "Occurrence records of *Haemaphysalis longicornis* used for model calibration (n = 389 after 10-km thinning and regional stratification), coloured by calibration region. Shading shows the accessible area (*M*; union of 1,000-km buffers around records, clipped to land). (a) Global view; (b) Australia, New Zealand and the south-west Pacific."
+#| fig-width: 11
+#| fig-height: 8.5
+world50 <- ne_countries(scale = 50, returnclass = "sf")
+M_df <- as.data.frame(aggregate(M_r, 4, fun = "max", na.rm = TRUE), xy = TRUE, na.rm = TRUE)
+p_glob <- ggplot() +
+  geom_sf(data = world50, fill = "grey93", colour = "grey75", linewidth = 0.15) +
+  geom_tile(data = M_df, aes(x, y), fill = "#9ecae1", alpha = 0.55) +
+  geom_point(data = occ, aes(lon, lat, colour = region), size = 1.1, alpha = 0.85) +
+  scale_colour_manual(values = reg_col, labels = reg_lab, name = NULL) +
+  coord_sf(xlim = c(-180, 180), ylim = c(-55, 75), expand = FALSE) +
+  labs(x = NULL, y = NULL, tag = "a") + theme(legend.position = "bottom")
+p_oce <- ggplot() +
+  geom_sf(data = world50, fill = "grey93", colour = "grey75", linewidth = 0.15) +
+  geom_tile(data = filter(M_df, x > 105, y < -5), aes(x, y), fill = "#9ecae1", alpha = 0.55) +
+  geom_point(data = filter(occ, region == "Oceania"), aes(lon, lat), colour = reg_col["Oceania"], size = 1.4) +
+  coord_sf(xlim = c(110, 180), ylim = c(-48, -10), expand = FALSE) +
+  labs(x = NULL, y = NULL, tag = "b")
+p_fig1 <- p_glob / p_oce + plot_layout(heights = c(1.1, 1))
+p_fig1
+save_fig("Fig1_occurrences_M", p_fig1, 11, 8.5)
+```
+:::
+
+## Variable selection and model tuning
+
+Of the `r nrow(set_res)` set × configuration combinations, `r nrow(ranked_sets)` passed the omission
+filter, all of them from sets `r paste(sort(unique(ranked_sets$set)), collapse = ", ")`
+(@supptbl-sets). Every one of these sets includes a direct temperature variable. The
+temperature-free set A had no passing configuration. In its best-discriminating configuration
+(`r a_best$fc`, β = `r a_best$rm`), set A ranked sites well within the withheld regions (mean LORO
+AUC = `r fmt(a_best$loro_auc)`) but failed to transfer suitability levels: when Oceania was withheld,
+`r fmt(100*filter(cv_A, fold == "Oceania")$or10, 0)`% of Oceanian records fell below the training
+threshold (East Asia: `r fmt(100*filter(cv_A, fold == "East_Asia")$or10, 0)`%). The three top-ranked
+sets were `r paste(sel_sets, collapse = ", ")`. All of them combine annual mean temperature with
+moisture-supply and aridity variables, and they differed only marginally in performance
+(@supptbl-sets). After tuning, the consensus members were
+`r paste(map_chr(members, ~ sprintf("set %s (%s; %s, β = %s; %d features)", .x$set, paste(.x$vars, collapse = ", "), .x$fc, .x$rm, n_feat[[.x$set]])), collapse = "; ")`.
+Simple, regularised configurations transferred best in all three sets (@suppfig-tuning).
+
+## Model performance
+
+The consensus model discriminated presences from available environments in every withheld region
+(@tbl-perf; @supptbl-folds). Transfer to Oceania from the native and North American records alone
+was strong (AUC = `r fmt(filter(cv_final, fold=="Oceania")$auc)`,
+CBI = `r fmt(filter(cv_final, fold=="Oceania")$cbi)`), indicating that the climatic conditions
+occupied in Australia and New Zealand are predictable from the rest of the range. Transfer to East
+Asia was the weakest (AUC = `r fmt(filter(cv_final, fold=="East_Asia")$auc)`) and had the highest
+omission (OR10 = `r fmt(filter(cv_final, fold=="East_Asia")$or10)`): models trained only on the
+invaded ranges under-predict the colder and more continental parts of the native range. Spatial
+block cross-validation gave mean AUC = `r fmt(cvs_final$blk_auc)`,
+CBI = `r fmt(cvs_final$blk_cbi)` and OR10 = `r fmt(cvs_final$blk_or10)`, moderately above the
+expected 0.10. Applied to the full dataset, the model classified
+`r fmt(filter(insample, region=="Oceania")$pct_suitable, 0)`% of Oceanian,
+`r fmt(filter(insample, region=="North_America")$pct_suitable, 0)`% of North American and
+`r fmt(filter(insample, region=="East_Asia")$pct_suitable, 0)`% of East Asian records as suitable at
+the 10th-percentile threshold (cloglog = `r fmt(thr_p10, 3)`; @supptbl-thr).
+
+::: {.primary-table}
+```{r}
+#| label: tbl-perf
+#| tbl-cap: "Evaluation of the consensus MaxEnt model. Cross-validated metrics are computed on withheld records against evaluation-background points from the same withheld region or blocks. AUC = area under the ROC curve; CBI = continuous Boyce index; OR10 = omission rate at the 10th-percentile training-presence threshold (expected 0.10). In-sample metrics use the consensus fitted to all records against the evaluation background of each region."
+perf_tab <- bind_rows(
+  cv_final |> filter(scheme == "loro") |>
+    transmute(Evaluation = "Leave-one-region-out", `Test data` = reg_lab[fold], n = n_test, AUC = auc, CBI = cbi, OR10 = or10),
+  cv_final |> filter(scheme == "block") |>
+    summarise(Evaluation = "Spatial block CV (5 folds)", `Test data` = "Mean across folds", n = sum(n_test),
+              AUC = mean(auc), CBI = mean(cbi, na.rm = TRUE), OR10 = mean(or10)),
+  insample |> transmute(Evaluation = "In-sample (full model)", `Test data` = reg_lab[region],
+                        n = as.integer(n_by_reg[region]), AUC = auc, CBI = cbi, OR10 = 1 - pct_suitable / 100))
+write_csv(perf_tab, file.path(out_dir, "model_performance.csv"))
+kable(perf_tab, digits = 3)
+```
+:::
+
+## Variable importance and response curves
+
+Annual mean temperature was the only predictor that was important in all three consensus members
+(permutation importance `r fmt(min(filter(var_imp, variable == "bio1")$permutation), 0)`–`r fmt(max(filter(var_imp, variable == "bio1")$permutation), 0)`%).
+The aridity index (sets H and C) and mean diurnal temperature range (sets C and G) carried most of
+the remaining importance (@fig-response a). Precipitation amounts were largely redundant once aridity
+and temperature were included. Annual precipitation and wettest-month precipitation were regularised
+to near-zero importance, and their marginal responses were flat. Consensus suitability was unimodal
+in annual mean temperature, peaking at about 12–15 °C and falling steeply below about 5 °C and above
+about 20 °C. It declined monotonically with increasing aridity and with increasing diurnal
+temperature range, the latter characterising continental and inland climates (@fig-response b).
+Suitability rose weakly at high precipitation seasonality. This reflects the monsoonal summer-rainfall
+climates of the core native range in eastern China, and the bootstrap interval is wide there.
+
+::: {.primary-figure}
+```{r}
+#| label: fig-response
+#| fig-cap: "Predictor importance and responses in the consensus model. (a) Permutation importance of each predictor in each consensus member (predictors absent from a member have no bar). (b) Marginal response curves of the consensus (mean cloglog suitability of the three members), with other predictors held at their median across presences; the line is the fitted consensus and the ribbon the 95% interval across 30 bootstrap replicates. Rugs show the predictor values at presence records, coloured by region."
+#| fig-width: 12
+#| fig-height: 9
+lvl <- var_lab[imp_order$variable]
+p_imp <- var_imp |> mutate(variable = factor(var_lab[variable], levels = rev(lvl)), set = paste("Set", set)) |>
+  ggplot(aes(permutation, variable, fill = set)) +
+  geom_col(position = position_dodge2(preserve = "single", width = 0.8), width = 0.75) +
+  scale_fill_brewer(palette = "Set2", name = "Consensus member") +
+  labs(x = "Permutation importance (%)", y = NULL, tag = "a") + theme(legend.position = "bottom")
+
+med <- occ |> summarise(across(all_of(sel_vars), median))
+resp_grid <- map_dfr(sel_vars, function(v) {
+  rng <- quantile(c(occ[[v]], bg_train[[v]]), c(0.005, 0.995))
+  nd <- med[rep(1, 200), ]; nd[[v]] <- seq(rng[1], rng[2], length.out = 200)
+  boot <- sapply(boot_models, ens_pred_df, x = nd)
+  tibble(variable = v, x = nd[[v]], fit = ens_pred_df(m_final, nd),
+         lo = apply(boot, 1, quantile, 0.025), hi = apply(boot, 1, quantile, 0.975))
+}) |> mutate(variable = factor(var_lab[variable], levels = lvl))
+rug_df <- occ |> dplyr::select(region, all_of(sel_vars)) |> pivot_longer(-region, names_to = "variable", values_to = "x") |>
+  mutate(variable = factor(var_lab[variable], levels = lvl))
+p_resp <- ggplot(resp_grid, aes(x)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "#2c7fb8", alpha = 0.25) +
+  geom_line(aes(y = fit), colour = "#08519c", linewidth = 0.9) +
+  geom_rug(data = rug_df, aes(x = x, colour = region), sides = "b", alpha = 0.5, length = unit(0.04, "npc")) +
+  scale_colour_manual(values = reg_col, labels = reg_lab, name = NULL) +
+  facet_wrap(~ variable, scales = "free_x", ncol = 3) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(x = NULL, y = "Consensus suitability (cloglog)", tag = "b") + theme(legend.position = "bottom")
+p_fig2 <- p_imp + p_resp + plot_layout(widths = c(1, 2.3))
+p_fig2
+save_fig("Fig2_importance_response", p_fig2, 12, 9)
+```
+:::
+
+## Current climatic suitability of Australia and New Zealand
+
+Suitable climate for *H. longicornis* is concentrated along the eastern seaboard of Australia, from
+south-east Queensland through coastal New South Wales and eastern and southern Victoria, and across
+Tasmania. Smaller areas lie in south-western Western Australia and the south-east of South
+Australia. Most of New Zealand is suitable (@fig-suit). In total, `r fmt_int(tot[["suitable"]])` km²
+(`r fmt(100*tot[["suitable"]]/tot[["land"]],1)`% of the two countries' land area) was classified as
+suitable (@tbl-area). Only `r fmt(100*tot[["novel"]]/tot[["land"]],1)`% of the land area had climates
+outside the calibration range (MESS < 0), almost entirely in the tropical north-west of Australia,
+where suitability is negligible (@suppfig-mess). Bootstrap uncertainty was low across most of the
+two countries. It was highest along the margins of the suitable area, notably inland Victoria,
+south-western Western Australia and the eastern South Island. More than 95% of replicates agreed on
+the binary classification of the core eastern Australian, Tasmanian and New Zealand ranges
+(@suppfig-boot). Victoria (`r fmt(filter(area_tab, jurisdiction == "Victoria")$pct_suitable, 0)`%),
+New South Wales (`r fmt(filter(area_tab, jurisdiction == "New South Wales")$pct_suitable, 0)`%) and
+Tasmania (`r fmt(filter(area_tab, jurisdiction == "Tasmania")$pct_suitable, 0)`%) had the largest
+suitable proportions in Australia. Queensland's large total land area translated into only
+`r fmt_int(filter(area_tab, jurisdiction == "Queensland")$suitable_km2)` km² of suitable climate,
+confined to the south-east and a few coastal and upland pockets further north. The Northern
+Territory had none. The global projection reproduced the native distribution in eastern China, the
+Korean Peninsula and Japan and the invaded range in the eastern United States (@suppfig-global).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-suit
+#| fig-cap: "Current climatic suitability for *Haemaphysalis longicornis* in Australia and New Zealand. (a) Continuous cloglog suitability with known Oceanian records (training records and ALA records; black points). (b) Binary suitability at the 10th-percentile training-presence threshold; pale colours indicate cells with climates outside the calibration range (MESS < 0)."
+#| fig-width: 12
+#| fig-height: 6
+aunz_sf <- world10 |> filter(admin %in% c("Australia", "New Zealand"))
+bin_cls <- (suit_bin + 1) + 2 * (mess_r < 0)       # 1 unsuitable, 2 suitable, 3 unsuitable-novel, 4 suitable-novel
+bin_cls <- as.factor(bin_cls)
+levels(bin_cls) <- data.frame(ID = 1:4, class = c("Unsuitable", "Suitable", "Unsuitable (novel climate)", "Suitable (novel climate)"))
+map_base <- list(coord_sf(xlim = c(112, 179), ylim = c(-47.5, -10), expand = FALSE),
+                 labs(x = NULL, y = NULL), theme(panel.background = element_rect(fill = "#f4f8fb", colour = NA)))
+p_cont <- ggplot() +
+  geom_spatraster(data = pred_cur, maxcell = 2e6) +
+  scale_fill_viridis_c(option = "magma", direction = -1, limits = c(0, 1), na.value = NA, name = "Suitability") +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.15) +
+  geom_point(data = known, aes(lon, lat), size = 0.6, colour = "black") +
+  map_base + labs(tag = "a")
+p_bin <- ggplot() +
+  geom_spatraster(data = bin_cls, maxcell = 2e6) +
+  scale_fill_manual(values = c("Unsuitable" = "grey88", "Suitable" = "#2166ac",
+                               "Unsuitable (novel climate)" = "#f6e8c3", "Suitable (novel climate)" = "#92c5de"),
+                    na.value = NA, na.translate = FALSE, name = NULL, drop = FALSE) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.15) +
+  map_base + labs(tag = "b") + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 2))
+p_fig3 <- p_cont + p_bin
+p_fig3
+save_fig("Fig3_current_suitability", p_fig3, 12, 6)
+```
+:::
+
+::: {.primary-table}
+```{r}
+#| label: tbl-area
+#| tbl-cap: "Land area classified as climatically suitable for *H. longicornis* by jurisdiction (10th-percentile training-presence threshold). *Suitable (analogue)* excludes cells with novel climate (MESS < 0). *Suitable but unrecorded* is suitable area more than 100 km from any known record."
+area_print <- area_tab |>
+  transmute(Jurisdiction = jurisdiction, `Land (km²)` = fmt_int(land_km2), `Suitable (km²)` = fmt_int(suitable_km2),
+            `Suitable (%)` = fmt(pct_suitable, 1), `Suitable, analogue (km²)` = fmt_int(suitable_analog_km2),
+            `Suitable but unrecorded (km²)` = fmt_int(gap_km2))
+kable(area_print, align = "lrrrrr")
+```
+:::
+
+## Niche comparison between native and invaded ranges
+
+In the climatic space defined by the model predictors (first two PCA axes explaining
+`r fmt(100*sum(pca$eig[1:2])/sum(pca$eig), 0)`% of the variation), the Oceanian and native niches
+overlapped moderately (Schoener's *D* = `r fmt(nc_oc$tab$D)`). Niche equivalency could not be
+rejected (P = `r fmt(nc_oc$tab$p_equivalency)`), and the Oceanian niche was more similar to the
+native niche than expected from the climates available in Oceania (P = `r fmt(nc_oc$tab$p_similarity, 3)`;
+@supptbl-niche, @suppfig-nichetests). Within climates shared by both ranges, `r fmt(100*nc_oc$tab$stability, 0)`%
+of the Oceanian niche coincided with the native niche (stability). Expansion into climates unused in
+the native range was limited (`r fmt(100*nc_oc$tab$expansion, 0)`%). It was directed towards wet
+climates with evenly distributed rainfall and substantial dry-season precipitation (high PC2; low
+BIO15, high BIO17), typical of New Zealand and coastal south-eastern Australia (@fig-niche a). About
+a third of the native niche was unfilled in Oceania (`r fmt(100*nc_oc$tab$unfilling, 0)`%). This
+part corresponds to drier, strongly seasonal summer-rainfall climates with dry winters and larger
+diurnal temperature ranges (high PC1, low PC2), characteristic of northern and inland China. In contrast, the North American niche overlapped very little with the native niche
+(*D* = `r fmt(nc_na$tab$D)`) and was not equivalent to it (P = `r fmt(nc_na$tab$p_equivalency, 3)`).
+This was not because of expansion into novel climates. Rather, North American records occupy a small
+part of the climates available there, leaving `r fmt(100*nc_na$tab$unfilling, 0)`% of the native
+niche unfilled (@fig-niche b).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-niche
+#| fig-cap: "Niche dynamics of *H. longicornis* in climatic space (first two PCA axes of the model predictors, calibrated on the background of all regions). Blue = niche stability (climates occupied in both ranges); red = expansion (occupied only in the invaded range); green = unfilling (occupied only in the native range); colour intensity reflects occurrence density. Green and red contours delimit the climates available in the native and invaded ranges, respectively (100%, and 75% for the paler line). Arrows show the shift from the native to the invaded niche centroid (solid) and background centroid (dashed). (a) East Asia vs. Oceania; (b) East Asia vs. North America."
+#| fig-width: 11
+#| fig-height: 5.5
+par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+for (inv in c("Oceania", "North_America")) {
+  ecospat.plot.niche.dyn(z[["East_Asia"]], z[[inv]], quant = 0.25, interest = 2,
+                         title = paste(ifelse(inv == "Oceania", "(a)", "(b)"), "East Asia vs.", gsub("_", " ", inv)),
+                         name.axis1 = sprintf("PC1 (%.0f%%)", 100 * pca$eig[1] / sum(pca$eig)),
+                         name.axis2 = sprintf("PC2 (%.0f%%)", 100 * pca$eig[2] / sum(pca$eig)))
+  ecospat.shift.centroids(sc_occ[occ$region == "East_Asia", ], sc_occ[occ$region == inv, ],
+                          sc_bg[bg_eval$region == "East_Asia", ], sc_bg[bg_eval$region == inv, ])
+}
+png(file.path(fig_dir, "Fig4_niche_dynamics.png"), width = 11, height = 5.5, units = "in", res = 300)
+par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+for (inv in c("Oceania", "North_America")) {
+  ecospat.plot.niche.dyn(z[["East_Asia"]], z[[inv]], quant = 0.25, interest = 2,
+                         title = paste(ifelse(inv == "Oceania", "(a)", "(b)"), "East Asia vs.", gsub("_", " ", inv)),
+                         name.axis1 = "PC1", name.axis2 = "PC2")
+  ecospat.shift.centroids(sc_occ[occ$region == "East_Asia", ], sc_occ[occ$region == inv, ],
+                          sc_bg[bg_eval$region == "East_Asia", ], sc_bg[bg_eval$region == inv, ])
+}
+invisible(dev.off())
+```
+:::
+
+## Limiting factors and surveillance gaps
+
+Aridity was the most limiting factor across most of inland Australia. Mean diurnal temperature
+range was limiting along the western slopes and tablelands of the Great Dividing Range, immediately
+inland of the suitable eastern belt. High annual mean temperature was limiting across the tropical
+north (@fig-limit a). In Tasmania, the South Island and upland areas of New Zealand, low annual mean
+temperature was the main factor reducing suitability below its optimum, although most of these areas
+still exceeded the suitability threshold. Of the suitable area, `r fmt_int(tot[["gap"]])` km²
+(`r fmt(100*tot[["gap"]]/tot[["suitable"]], 0)`%) lay more than 100 km from any known Oceanian record
+(@fig-limit b; @tbl-area). Most of this was in the NZ South Island
+(`r fmt_int(filter(area_tab, jurisdiction == "NZ South Island")$gap_km2)` km²), Tasmania
+(`r fmt_int(filter(area_tab, jurisdiction == "Tasmania")$gap_km2)` km²), western and coastal Victoria
+(`r fmt_int(filter(area_tab, jurisdiction == "Victoria")$gap_km2)` km²), coastal Queensland north of
+the main known range (`r fmt_int(filter(area_tab, jurisdiction == "Queensland")$gap_km2)` km²) and the
+south-east of South Australia (`r fmt_int(filter(area_tab, jurisdiction == "South Australia")$gap_km2)` km²).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-limit
+#| fig-cap: "(a) Most limiting climatic factor in each grid cell (the predictor whose adjustment to its median value at presence records would most increase suitability; Elith et al. 2010). (b) Suitable climate relative to known records: suitable cells within 100 km of a known Oceanian record, and suitable cells more than 100 km from any known record (candidate surveillance areas)."
+#| fig-width: 12
+#| fig-height: 6
+lim_f <- as.factor(limit_r)
+levels(lim_f) <- data.frame(ID = seq_along(sel_vars), factor = var_lab[sel_vars])
+lim_cols <- setNames(c("#e41a1c", "#ff7f00", "#4daf4a", "#377eb8", "#984ea3", "#a65628", "#f781bf", "#999999")[seq_along(sel_vars)], var_lab[sel_vars])
+p_lim <- ggplot() + geom_spatraster(data = lim_f, maxcell = 2e6) +
+  scale_fill_manual(values = lim_cols, na.value = NA, na.translate = FALSE, name = NULL) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.15) +
+  map_base + labs(tag = "a") + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 2))
+gap_f <- as.factor(gap_r)
+levels(gap_f) <- data.frame(ID = 0:2, class = c("Unsuitable", "Suitable, ≤100 km from known record", "Suitable, >100 km from known records"))
+p_gap <- ggplot() + geom_spatraster(data = gap_f, maxcell = 2e6) +
+  scale_fill_manual(values = c("grey88", "#4393c3", "#d6604d"), na.value = NA, na.translate = FALSE, name = NULL) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.15) +
+  geom_point(data = known, aes(lon, lat), size = 0.5, colour = "black") +
+  map_base + labs(tag = "b") + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 2))
+p_fig5 <- p_lim + p_gap
+p_fig5
+save_fig("Fig5_limiting_factors_gaps", p_fig5, 12, 6)
+```
+:::
+
+# Discussion
+
+We developed a consensus species distribution model for *H. longicornis* that was selected for, and
+demonstrably capable of, transfer between continents. Trained without any Oceanian records, it
+reproduced the known Australian and New Zealand distribution, ranking occupied sites far above
+available environments (AUC = `r fmt(filter(cv_final, fold == "Oceania")$auc)`; Boyce index =
+`r fmt(filter(cv_final, fold == "Oceania")$cbi)`). Fitted to all records, the model indicates that
+current climate permits *H. longicornis* across `r fmt_int(tot[["suitable"]])` km² of Australia and
+New Zealand. This area is concentrated on the humid, thermally equable eastern seaboard of Australia,
+Tasmania and almost all of New Zealand, and is bounded inland by aridity and continental temperature
+regimes and to the north by heat.
+
+## Transferability depends on predictors and sampling design
+
+Two methodological choices largely determined whether the model transferred. The first was the
+treatment of sampling bias. GBIF tick records, the usual source of target-group background, are
+dominated by North American data. A single global sampling-effort surface would therefore place most
+background points in North America and contrast East Asian and Oceanian presences against very few
+local background points. Normalising sampling effort within regions and allocating background in
+proportion to area keeps the correction for survey intensity within regions without letting
+differences in data volume among countries dominate the fitted niche. Predictions were nearly
+identical with a uniform background (Spearman ρ = `r fmt(sens_cor)`; @suppfig-sens), so the
+conclusions do not depend on the details of the bias surface.
+
+The second was the predictor set. Automated stepwise VIF selection removed every absolute
+temperature variable because temperature is strongly collinear with VPD, PET and the thermal
+extremes. The resulting predictor set (set A) discriminated well within withheld regions but failed
+to transfer suitability levels: with Oceania withheld, `r fmt(100*filter(cv_A, fold == "Oceania")$or10, 0)`%
+of Oceanian records fell below the training threshold. Correlated variables such as VPD and
+isothermality can stand in for temperature within a calibration region, but the relationships among
+them differ between continents. Only a direct thermal gradient constrains predictions consistently.
+This is biologically expected. Development rates, questing activity and overwinter survival of ixodid
+ticks are governed by temperature, and off-host survival is governed by the atmospheric moisture
+balance [@needham1991; @heath2016]. The three predictor sets retained in the consensus each pair
+annual mean temperature with a moisture or desiccation axis, which matches this mechanistic
+expectation. Our results add to evidence that selecting predictors on ecological grounds and
+evaluating models by transfer, rather than by collinearity screening and within-region
+cross-validation alone, gives more reliable models for invasive species [@wenger2012; @dormann2013;
+@valavi2022].
+
+## Climatic limits in Australia and New Zealand
+
+The predicted Australian range matches the documented distribution of the tick along the eastern
+coast and in Victoria [@hoogstraal1968; @heath2016], and it captures the outlying south-western
+Western Australian and north Queensland records. Inland, suitability is limited first by large
+diurnal temperature ranges along the western fall of the Great Dividing Range and then by aridity
+across the interior. Both reflect the vulnerability of non-feeding stages to desiccation
+[@needham1991]. In the tropical north, high mean temperatures limit suitability. Here the native-range
+evidence is clear: *H. longicornis* is absent from the tropical lowlands of southern China and
+South-East Asia. The few tropical records from Pacific islands come from small, maritime, highly
+humid environments that have no counterpart in northern Australia. New Zealand is almost entirely
+suitable, consistent with the tick's long-established distribution across the North Island and its
+presence in parts of the South Island [@heath2016]. Low annual mean temperature is the main factor
+reducing suitability in the south and at altitude.
+
+## Niche conservatism and its implications
+
+The Oceanian niche was equivalent to and more similar than expected to the native niche, with high
+stability and limited expansion. This is consistent with the general pattern that climatic niches
+are largely conserved during invasion [@petitpierre2012; @guisan2014], and it explains why
+native-range information transferred well to Australia and New Zealand. The unfilled part of the
+native niche consists of drier, strongly seasonal summer-rainfall climates. In Australia, comparable
+rainfall regimes occur mainly in the monsoonal north, where temperatures exceed the species' optimum,
+so unfilling probably reflects how climate axes combine in Oceania rather than an inability of the
+invasive lineage to tolerate these conditions. The very low overlap with the North
+American niche has a different cause. Records there cover a small subset of the available climates,
+which is the expected signature of a population still spreading after its detection in 2017
+[@rainey2018], rather than a genuine niche shift. Because the North American population is far from
+equilibrium, models calibrated only on North American records would greatly underestimate the
+species' climatic tolerance. Transfer to East Asia was the weakest in our cross-validation for the
+same reason: the invaded ranges sample only part of the native niche. Pooling all three ranges, as
+done here, is therefore preferable to calibrating on either native or invaded records alone.
+
+## Implications for surveillance
+
+About `r fmt(100*tot[["gap"]]/tot[["suitable"]], 0)`% of the suitable area lies more than 100 km
+from any record in our dataset, mostly in Tasmania, the South Island of New Zealand, western and
+coastal Victoria and south-eastern South Australia. These areas are climatically comparable to the
+core of the established range, carry large livestock populations, and are connected to infested
+regions by stock movements. They are logical targets for structured surveillance. A lack of records
+in these areas should not be taken as evidence of absence: our compilation relies on opportunistic
+and published records, and some suitable areas may already be occupied but under-reported. Conversely,
+surveillance resources are unlikely to be well spent in the arid and tropical interior, where climate
+is unsuitable with high confidence and with little extrapolation.
+
+## Limitations
+
+Several limitations should be borne in mind. First, the model describes climatic suitability at a
+resolution of about 5 km. It does not account for vegetation, microclimate, host availability
+(particularly cattle density) or land use, all of which determine local tick abundance. The binary
+maps therefore indicate where populations could persist climatically, not where the tick is present
+or abundant. Second, cloglog output is a relative index of suitability, and binary maps depend on
+the threshold. The 10th-percentile training-presence threshold is deliberately inclusive of most
+known records, but the alternative threshold changes the suitable area (@supptbl-thr). Third, the
+target-group data used to correct for sampling bias are themselves uneven, particularly in East
+Asia. The close agreement with a uniform background suggests this has little effect on predictions.
+Fourth, bisexual and parthenogenetic populations were pooled. The invaded populations are
+parthenogenetic, and if the two forms differ in climatic tolerance, the invaded-range niche may be
+better represented by the subset of native localities occupied by parthenogenetic populations
+[@hoogstraal1968]. Fifth, omission under spatial-block cross-validation (OR10 =
+`r fmt(cvs_final$blk_or10)`) was above the nominal 0.10, indicating some residual over-fitting, and
+transfer to the native range was weaker than to the invaded ranges. Finally, this analysis addresses
+current climate only. Projecting these relationships to future climates will require attention to
+extrapolation, because several predictors will move outside the calibration range across northern
+and inland Australia [@elith2010; @owens2013].
+
+## Conclusions
+
+The climatic niche of *H. longicornis* has been conserved during its invasion of Australia and
+New Zealand, and a model calibrated across all ranges predicts its distribution there accurately,
+provided the model includes an absolute temperature gradient and corrects for regional imbalance in
+sampling effort. Suitable climate is concentrated on the eastern seaboard of Australia, in Tasmania
+and across New Zealand, and is limited inland by aridity and continental temperature regimes. The
+climatically suitable but apparently unoccupied areas identified here, especially Tasmania and
+southern New Zealand, should be prioritised for surveillance. The transferability-based framework
+used here provides a defensible baseline for future projections under climate change.
+
+# Supplementary material {.appendix}
+
+## Supplementary tables
+
+::: {.supp-table}
+::: {#supptbl-occ}
+```{r}
+occ |> count(region, country) |> mutate(region = reg_lab[region]) |>
+  arrange(region, desc(n)) |> rename(Region = region, Country = country, Records = n) |> kable()
+```
+Occurrence records used for calibration by region and country.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-sets}
+```{r}
+best_by_set |>
+  transmute(Set = set, Description = set_desc[set], Variables = map_chr(cand_sets[set], paste, collapse = ", "),
+            `max |ρ|` = set_coll$max_abs_rho[match(set, set_coll$set)], `max VIF` = set_coll$max_VIF[match(set, set_coll$set)],
+            `Best FC` = fc, `Best β` = rm, `LORO AUC` = loro_auc, `LORO CBI` = loro_cbi, `LORO OR10` = loro_or10,
+            `Block AUC` = blk_auc, `Block CBI` = blk_cbi, `Block OR10` = blk_or10,
+            `Passes omission filter` = ifelse(pass, "yes", "no"), `Rank sum` = rank_sum) |>
+  kable(digits = 3)
+```
+Candidate predictor sets, their collinearity across the accessible area, and the cross-validated performance of each set's best configuration (feature classes LQ/LQH/LQHP × β = 1, 2, 4, 8). For sets with at least one configuration passing the omission filter (mean LORO OR10 ≤ 0.30, mean block OR10 ≤ 0.20), the best-ranked passing configuration is shown and rank sums are computed across all `r nrow(ranked_sets)` passing configurations (lower is better). For sets with no passing configuration, the configuration with the lowest transfer omission is shown.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-folds}
+```{r}
+cv_final |> mutate(fold = ifelse(scheme == "loro", reg_lab[fold], paste("Block fold", fold)),
+                   scheme = ifelse(scheme == "loro", "Leave-one-region-out", "Spatial block")) |>
+  rename(Scheme = scheme, `Test fold` = fold, `n test` = n_test, AUC = auc, CBI = cbi, OR10 = or10) |>
+  kable(digits = 3)
+```
+Cross-validation results for the consensus model by fold.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-thr}
+```{r}
+tibble(Threshold = c("10th-percentile training presence (primary)", "Maximum sensitivity + specificity (vs. evaluation background)"),
+       `Cloglog value` = c(thr_p10, thr_mss),
+       `Suitable area, Aus + NZ (km²)` = fmt_int(c(tot[["suitable"]], global(carea * (pred_cur >= thr_mss), "sum", na.rm = TRUE)[[1]])),
+       `Records predicted suitable (%)` = 100 * c(mean(p_occ >= thr_p10), mean(p_occ >= thr_mss))) |>
+  kable(digits = 3)
+```
+Alternative suitability thresholds and their consequences.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-niche}
+```{r}
+niche_tab |> rename(Comparison = comparison, `Schoener's D` = D, `P (equivalency; non-equivalence)` = p_equivalency,
+                    `P (similarity)` = p_similarity, Stability = stability, Expansion = expansion, Unfilling = unfilling) |>
+  kable(digits = 3)
+```
+Niche overlap, equivalency and similarity tests (100 randomisations), and niche dynamics indices (computed in analogue climates; intersection = 0.1) between the native and each invaded range. The equivalency test evaluates whether overlap is lower than expected if occurrences were interchangeable between ranges; the similarity test evaluates whether overlap is higher than expected given the climates available in the invaded range.
+:::
+:::
+
+## Supplementary figures
+
+::: {.supp-figure}
+::: {#suppfig-cor}
+```{r}
+#| fig-width: 10
+#| fig-height: 9
+cor_df <- as.data.frame(as.table(cor_bg)) |> mutate(across(1:2, ~ factor(.x, levels = cand_vars)))
+ggplot(cor_df, aes(Var1, Var2, fill = Freq)) + geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%.2f", Freq)), size = 2.3) +
+  scale_fill_gradient2(low = "#b2182b", high = "#2166ac", limits = c(-1, 1), name = "Spearman ρ") +
+  labs(x = NULL, y = NULL) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+save_fig("FigS1_predictor_correlation", w = 10, h = 9)
+```
+Spearman correlations among the `r length(cand_vars)` candidate predictors across the accessible area (evaluation background, n = `r fmt_int(nrow(bg_eval))`).
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-bias}
+```{r}
+#| fig-width: 11
+#| fig-height: 5.5
+bias_df <- as.data.frame(aggregate(bias_r, 4, mean, na.rm = TRUE), xy = TRUE, na.rm = TRUE)
+ggplot() + geom_sf(data = world50, fill = "grey95", colour = "grey75", linewidth = 0.1) +
+  geom_tile(data = bias_df, aes(x, y, fill = bias)) +
+  scale_fill_viridis_c(option = "inferno", trans = "sqrt", name = "Relative\nsampling effort") +
+  geom_point(data = bg_train, aes(lon, lat), size = 0.05, alpha = 0.25, colour = "cyan") +
+  coord_sf(xlim = c(-180, 180), ylim = c(-55, 75), expand = FALSE) + labs(x = NULL, y = NULL)
+save_fig("FigS2_bias_surface", w = 11, h = 5.5)
+```
+Target-group sampling-effort surface (kernel density of Ixodidae records, normalised within each region) and the resulting bias-corrected training background points (cyan; n = `r fmt_int(nrow(bg_train))`).
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-envdens}
+```{r}
+#| fig-width: 11
+#| fig-height: 7
+dens_df <- bind_rows(occ |> mutate(type = "Presence") |> dplyr::select(region, type, all_of(sel_vars)),
+                     bg_eval |> mutate(type = "Available (M)") |> dplyr::select(region, type, all_of(sel_vars))) |>
+  pivot_longer(all_of(sel_vars), names_to = "variable") |> mutate(variable = var_lab[variable], region = reg_lab[region])
+ggplot(dens_df, aes(value, fill = type)) + geom_density(alpha = 0.5, colour = NA) +
+  facet_grid(region ~ variable, scales = "free") + scale_fill_manual(values = c("grey60", "#d6604d"), name = NULL) +
+  labs(x = NULL, y = "Density") + theme(legend.position = "bottom", strip.text = element_text(size = 8))
+save_fig("FigS3_presence_vs_available", w = 11, h = 7)
+```
+Distribution of the selected predictors at presence records and across the available environment (uniform background within *M*) for each calibration region.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-tuning}
+```{r}
+#| fig-width: 14
+#| fig-height: 6.5
+tune_all |> pivot_longer(c(loro_auc, loro_cbi, loro_or10, blk_auc, blk_cbi, blk_or10)) |>
+  mutate(scheme = ifelse(grepl("loro", name), "Leave-one-region-out", "Spatial block"),
+         metric = toupper(sub(".*_", "", name))) |>
+  ggplot(aes(rm, value, colour = fc)) + geom_line() + geom_point(size = 1.5) +
+  geom_point(data = \(d) semi_join(d, tune_sel, by = c("set", "fc", "rm")), shape = 21, size = 4, colour = "black") +
+  facet_grid(metric ~ paste("Set", set) + scheme, scales = "free_y") +
+  scale_colour_brewer(palette = "Dark2", name = "Features") +
+  labs(x = "Regularisation multiplier (β)", y = NULL) + theme(strip.text = element_text(size = 7))
+save_fig("FigS4_tuning", w = 14, h = 6.5)
+```
+Cross-validated performance of MaxEnt configurations for each of the three predictor sets retained for the consensus. Circled points mark the configuration selected for each set.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-global}
+```{r}
+#| fig-width: 11
+#| fig-height: 5.5
+env_glob <- aggregate(crop(env_all[[sel_vars]], M_r), 4, mean, na.rm = TRUE) |> mask(aggregate(M_r, 4, max, na.rm = TRUE))
+pred_glob <- ens_pred_rast(m_final, env_glob)
+ggplot() + geom_sf(data = world50, fill = "grey93", colour = "grey75", linewidth = 0.1) +
+  geom_spatraster(data = pred_glob) +
+  scale_fill_viridis_c(option = "magma", direction = -1, limits = c(0, 1), na.value = NA, name = "Suitability") +
+  geom_point(data = occ, aes(lon, lat), size = 0.3, colour = "cyan3") +
+  coord_sf(xlim = c(-180, 180), ylim = c(-55, 70), expand = FALSE) + labs(x = NULL, y = NULL)
+save_fig("FigS5_global_suitability_M", w = 11, h = 5.5)
+```
+Predicted suitability across the accessible area (10-km resolution) with calibration records (cyan).
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-mess}
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+mod_f <- as.factor(mod_r); lv <- levels(mod_f)[[1]]
+levels(mod_f) <- data.frame(ID = lv[[1]], var = var_lab[sel_vars][lv[[1]]])
+p_mess <- ggplot() + geom_spatraster(data = clamp(mess_r, -50, 50)) +
+  scale_fill_gradient2(low = "#b2182b", mid = "white", high = "#2166ac", midpoint = 0, na.value = NA, name = "MESS") +
+  map_base + labs(tag = "a")
+p_mod <- ggplot() + geom_spatraster(data = mod_f) +
+  scale_fill_brewer(palette = "Set2", na.value = NA, na.translate = FALSE, name = NULL) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey50", linewidth = 0.15) +
+  map_base + labs(tag = "b") + theme(legend.position = "bottom")
+p_mess + p_mod
+save_fig("FigS6_mess_mod", p_mess + p_mod, 12, 6)
+```
+(a) Multivariate environmental similarity surface (MESS; truncated at ±50) relative to calibration environments; negative values indicate novel climates. (b) Most dissimilar variable in cells with MESS < 0.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-boot}
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+p_sd <- ggplot() + geom_spatraster(data = boot_sd) +
+  scale_fill_viridis_c(option = "viridis", na.value = NA, name = "SD") + map_base + labs(tag = "a")
+p_ag <- ggplot() + geom_spatraster(data = boot_bin) +
+  scale_fill_distiller(palette = "RdBu", direction = 1, limits = c(0, 1), na.value = NA, name = "Proportion of\nreplicates\nsuitable") +
+  map_base + labs(tag = "b")
+p_sd + p_ag
+save_fig("FigS7_bootstrap_uncertainty", p_sd + p_ag, 12, 6)
+```
+Bootstrap uncertainty (30 replicates). (a) Standard deviation of cloglog suitability. (b) Proportion of replicates classifying each cell as suitable at the final-model threshold.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-nichetests}
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+par(mfrow = c(2, 2))
+ecospat.plot.overlap.test(nc_oc$eq, "D", "Equivalency: East Asia vs Oceania")
+ecospat.plot.overlap.test(nc_oc$sim, "D", "Similarity: East Asia vs Oceania")
+ecospat.plot.overlap.test(nc_na$eq, "D", "Equivalency: East Asia vs N. America")
+ecospat.plot.overlap.test(nc_na$sim, "D", "Similarity: East Asia vs N. America")
+```
+Null distributions of Schoener's *D* from niche equivalency and similarity tests (100 randomisations); the red line shows observed overlap.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-sens}
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+p_u <- ggplot() + geom_spatraster(data = pred_unif) +
+  scale_fill_viridis_c(option = "magma", direction = -1, limits = c(0, 1), na.value = NA, name = "Suitability") +
+  map_base + labs(tag = "a")
+sens_df <- as_tibble(sens_vals) |> setNames(c("bias", "unif")) |> slice_sample(n = 20000)
+p_sc <- ggplot(sens_df, aes(bias, unif)) + geom_bin2d(bins = 60) + scale_fill_viridis_c(trans = "log10", name = "Cells") +
+  geom_abline(linetype = 2) + labs(x = "Final model (bias-corrected background)", y = "Uniform background", tag = "b") +
+  coord_equal()
+p_u + p_sc
+save_fig("FigS8_background_sensitivity", p_u + p_sc, 12, 6)
+```
+Sensitivity to background design. (a) Suitability predicted by the same configuration fitted with a uniform background. (b) Cell-wise comparison with the final model (Spearman ρ = `r fmt(sens_cor)`; binary agreement = `r fmt(100*bin_agree,1)`%). Cross-validated performance with the uniform background: LORO AUC = `r fmt(cv_summary(cv_unif)$loro_auc)`, LORO CBI = `r fmt(cv_summary(cv_unif)$loro_cbi)`, block AUC = `r fmt(cv_summary(cv_unif)$blk_auc)`.
+:::
+:::
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+# Computational environment {.unnumbered .appendix}
+
+```{r}
+#| label: session-info
+#| cache: false
+key_results <- list(n_occ = n_occ, sel_sets = sel_sets, members = members, sel_vars = sel_vars, tune_sel = tune_sel,
+                    n_feat = n_feat, cv = cvs_final, cv_folds = cv_final, insample = insample, thr_p10 = thr_p10,
+                    thr_mss = thr_mss, tot = tot, area = area_tab, niche = niche_tab, var_imp = var_imp,
+                    sens_cor = sens_cor, bin_agree = bin_agree, best_by_set = best_by_set)
+saveRDS(key_results, file.path(out_dir, "key_results.rds"))
+sessionInfo()
+```

@@ -2,7 +2,24 @@
 title: "Step 10: Visualization and Results Summary"
 author: "Alexander W. Gofton"
 date: today
-format: gfm
+format:
+  gfm:
+    toc: true
+    toc-depth: 3
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme:
+      light: cosmo
+      dark: darkly
+execute:
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    results: hold
 ---
 
 ## Overview
@@ -28,6 +45,10 @@ library(sf)
 library(rnaturalearth)
 library(rnaturalearthdata)
 library(patchwork)
+library(leaflet)
+library(raster)       # needed for addRasterImage() — leaflet doesn't support terra natively
+library(RColorBrewer)
+library(viridis)
 ```
 
 ```{r}
@@ -155,11 +176,11 @@ p_current <- ggplot() +
   geom_raster(data = pred_df, aes(x = x, y = y, fill = suitability)) +
   # Overlay MESS < 0 as semi-transparent hatching
   geom_raster(data = mess_df, aes(x = x, y = y), fill = "grey50", alpha = 0.3) +
-  scale_fill_viridis_c(
-    name = "Habitat\nsuitability",
-    option = "magma",
-    limits = c(0, 1)
-  ) +
+  scale_fill_gradientn(
+      colours = c("white", magma(256, direction = -1)),
+      limits = c(0, 1),
+      name = "Habitat\nSuitability"
+    ) +
   geom_point(data = occ_aus, aes(x = lon, y = lat),
              colour = "cyan", size = 1.2, alpha = 0.8, shape = 16) +
   coord_sf(xlim = c(110, 180), ylim = c(-48, -8)) +
@@ -169,6 +190,14 @@ p_current <- ggplot() +
   ) +
   theme_minimal(base_size = 11)
 
+p_current
+
+ggsave(file.path(figures_dir, "10_fig1_current_suitability_binary.png"),
+         width = 12, height = 10, dpi = 300)
+
+```
+
+```{r binary-map}
 # Binary suitability map (with MESS classes)
 binary_df <- as.data.frame(pred_binary, xy = TRUE) %>%
   filter(!is.na(suitable))
@@ -210,10 +239,102 @@ p_binary <- ggplot() +
   theme_minimal(base_size = 11) +
   theme(legend.position = "bottom")
 
-p_current / p_binary
+p_binary
 
-ggsave(file.path(figures_dir, "10_fig1_current_suitability.png"),
+ggsave(file.path(figures_dir, "10_fig1_current_suitability_binary.png"),
        width = 12, height = 10, dpi = 300)
+```
+
+### Interactive: Current continuous suitability
+
+```{r}
+#| label: leaflet-current-continuous
+
+# Convert terra SpatRaster to raster::RasterLayer for leaflet
+pred_current_rl <- raster::raster(pred_current)
+
+# Build a colour palette matching the static magma scheme
+pal_suitability <- colorNumeric(
+  palette = c("white", viridisLite::magma(256, direction = -1)),
+  domain = c(0, 1),
+  na.color = "transparent"
+)
+
+leaflet() %>%
+  addProviderTiles(providers$OpenStreetMap, group = "OpenStreetMap") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addRasterImage(
+    pred_current_rl,
+    colors = pal_suitability,
+    opacity = 0.7,
+    group = "Suitability"
+  ) %>%
+  addCircleMarkers(
+    data = occ_aus,
+    lng = ~lon, lat = ~lat,
+    radius = 3, color = "cyan", fillOpacity = 0.8,
+    stroke = FALSE,
+    group = "Occurrences"
+  ) %>%
+  addLegend(
+    pal = pal_suitability, values = c(0, 1),
+    title = "Habitat<br>suitability",
+    position = "bottomright"
+  ) %>%
+  addLayersControl(
+    baseGroups = c("OpenStreetMap", "Satellite"),
+    overlayGroups = c("Suitability", "Occurrences"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  setView(lng = 145, lat = -28, zoom = 4)
+```
+
+### Interactive: Current binary suitability with MESS
+
+```{r}
+#| label: leaflet-current-binary
+
+# Create a three-class raster: 0 = unsuitable, 1 = suitable, 2 = novel climate
+binary_class_rast <- pred_binary
+binary_class_rast[mess_current < 0 & !is.na(pred_binary)] <- 2
+
+binary_class_rl <- raster::raster(binary_class_rast)
+
+# Categorical colour palette
+pal_binary <- colorFactor(
+  palette = c("grey85", "#2166AC", "#FFD700"),
+  levels = c(0, 1, 2),
+  na.color = "transparent"
+)
+
+leaflet() %>%
+  addProviderTiles(providers$OpenStreetMap, group = "OpenStreetMap") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addRasterImage(
+    binary_class_rl,
+    colors = pal_binary,
+    opacity = 0.7,
+    group = "Suitability"
+  ) %>%
+  addCircleMarkers(
+    data = occ_aus,
+    lng = ~lon, lat = ~lat,
+    radius = 3, color = "red", fillOpacity = 0.8,
+    stroke = FALSE,
+    group = "Occurrences"
+  ) %>%
+  addLegend(
+    colors = c("#2166AC", "grey85", "#FFD700"),
+    labels = c("Suitable", "Unsuitable", "Novel climate (MESS < 0)"),
+    title = sprintf("Threshold: %.3f", primary_threshold),
+    position = "bottomright"
+  ) %>%
+  addLayersControl(
+    baseGroups = c("OpenStreetMap", "Satellite"),
+    overlayGroups = c("Suitability", "Occurrences"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  setView(lng = 145, lat = -28, zoom = 4)
 ```
 
 
@@ -293,6 +414,64 @@ if (length(shift_plots) == 4) {
 
   ggsave(file.path(figures_dir, "10_fig2_range_shift_maps.png"),
          width = 12, height = 10, dpi = 300)
+}
+```
+
+### Interactive: Range shift maps
+
+One leaflet map per SSP × period combination showing gain (green),
+stable suitable (blue), and loss (red).
+
+```{r}
+#| label: leaflet-range-shifts
+#| results: asis
+
+# Colour palette for range shift classes:
+# 0 = stable unsuitable (transparent), 1 = gain, 2 = loss, 3 = stable suitable
+pal_shift <- colorFactor(
+  palette = c("transparent", "#2ca02c", "#FF991C", "#1f77b4"),
+  levels = c(0, 1, 2, 3),
+  na.color = "transparent"
+)
+
+for (j in seq_len(nrow(ssp_periods))) {
+  group_id <- sprintf("ssp%s_%s", ssp_periods$ssp[j], ssp_periods$period[j])
+  shift_file <- file.path(processed_v2, paste0("range_shift_", group_id, ".tif"))
+
+  if (!file.exists(shift_file)) next
+
+  shift_rast <- rast(shift_file)
+  shift_rl <- raster::raster(shift_rast)
+
+  nice_label <- sprintf("SSP%s %s", ssp_periods$ssp[j], ssp_periods$period[j])
+
+  # Print a markdown header so each map gets its own sub-section
+  cat(sprintf("\n\n#### %s\n\n", nice_label))
+
+  m <- leaflet() %>%
+    addProviderTiles(providers$OpenStreetMap, group = "OpenStreetMap") %>%
+    addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+    addRasterImage(
+      shift_rl,
+      colors = pal_shift,
+      opacity = 0.7,
+      group = "Range shift"
+    ) %>%
+    addLegend(
+      colors = c("#2ca02c", "#1f77b4", "#FF991C"),
+      labels = c("Gain", "Stable suitable", "Loss"),
+      title = nice_label,
+      position = "bottomright"
+    ) %>%
+    addLayersControl(
+      baseGroups = c("OpenStreetMap", "Satellite"),
+      overlayGroups = c("Range shift"),
+      options = layersControlOptions(collapsed = FALSE)
+    ) %>%
+    setView(lng = 145, lat = -28, zoom = 4)
+
+  # htmlwidgets::knit_print is needed inside loops for leaflet in Quarto
+  print(htmltools::tagList(m))
 }
 ```
 
@@ -426,6 +605,51 @@ if (exists("priority_df") && nrow(priority_df) > 0) {
 }
 ```
 
+### Interactive: Priority surveillance
+
+```{r}
+#| label: leaflet-priority-surveillance
+
+if (exists("priority_df") && nrow(priority_df) > 0) {
+  # Create a two-class raster: 1 = currently suitable, 2 = priority surveillance
+  # Start from current suitability
+  surv_rast <- current_suitable * 1
+  surv_rast[priority == 1] <- 2
+
+  surv_rl <- raster::raster(surv_rast)
+
+  pal_surv <- colorFactor(
+    palette = c("transparent", "#1f77b4", "#ff7f0e"),
+    levels = c(0, 1, 2),
+    na.color = "transparent"
+  )
+
+  leaflet() %>%
+    addProviderTiles(providers$OpenStreetMap, group = "OpenStreetMap") %>%
+    addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+    addRasterImage(
+      surv_rl,
+      colors = pal_surv,
+      opacity = 0.7,
+      group = "Surveillance"
+    ) %>%
+    addLegend(
+      colors = c("#1f77b4", "#ff7f0e"),
+      labels = c("Currently suitable", "Priority surveillance (new in ≥4/5 GCMs)"),
+      title = "SSP5-8.5, 2081–2100",
+      position = "bottomright"
+    ) %>%
+    addLayersControl(
+      baseGroups = c("OpenStreetMap", "Satellite"),
+      overlayGroups = c("Surveillance"),
+      options = layersControlOptions(collapsed = FALSE)
+    ) %>%
+    setView(lng = 145, lat = -28, zoom = 4)
+} else {
+  message("No priority surveillance data available for leaflet map")
+}
+```
+
 ```{r}
 #| label: fig-gcm-agreement
 #| fig-cap: "Number of GCMs predicting suitability under SSP5-8.5 2081-2100."
@@ -454,6 +678,48 @@ if (exists("n_gcms_suitable")) {
 }
 ```
 
+### Interactive: GCM agreement
+
+```{r}
+#| label: leaflet-gcm-agreement
+
+if (exists("n_gcms_suitable")) {
+  gcm_agree_rl <- raster::raster(n_gcms_suitable)
+
+  # Sequential palette: 1–5 GCMs agreeing
+  pal_agree <- colorFactor(
+    palette = brewer.pal(5, "YlOrRd"),
+    levels = 1:5,
+    na.color = "transparent"
+  )
+
+  # Mask cells where n_gcms == 0 so they're transparent
+  gcm_agree_rl[gcm_agree_rl == 0] <- NA
+
+  leaflet() %>%
+    addProviderTiles(providers$OpenStreetMap, group = "OpenStreetMap") %>%
+    addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+    addRasterImage(
+      gcm_agree_rl,
+      colors = pal_agree,
+      opacity = 0.7,
+      group = "GCM agreement"
+    ) %>%
+    addLegend(
+      pal = pal_agree,
+      values = 1:5,
+      title = "GCMs<br>agreeing",
+      position = "bottomright"
+    ) %>%
+    addLayersControl(
+      baseGroups = c("OpenStreetMap", "Satellite"),
+      overlayGroups = c("GCM agreement"),
+      options = layersControlOptions(collapsed = FALSE)
+    ) %>%
+    setView(lng = 145, lat = -28, zoom = 4)
+}
+```
+
 
 ## 7. Summary tables
 
@@ -472,7 +738,7 @@ comparison
 
 shift_table %>%
   mutate(across(where(is.numeric) & !contains("pct"), ~ round(., 0))) %>%
-  select(scenario, current_suitable_km2, future_suitable_km2,
+  dplyr::select(scenario, current_suitable_km2, future_suitable_km2,
          gain_km2, loss_km2, net_change_km2, pct_change)
 ```
 
@@ -482,7 +748,7 @@ shift_table %>%
 #| label: uncertainty-table
 
 uncertainty %>%
-  select(ssp, period, median_pct_change, range_pct_change, median_extrapolation)
+  dplyr::select(ssp, period, median_pct_change, range_pct_change, median_extrapolation)
 ```
 
 ### Variable importance
@@ -526,37 +792,56 @@ if (exists("priority")) {
 }
 
 # Save a combined results summary
-results_overview <- tibble(
-  Section = c(
-    rep("Model", 5),
-    rep("Current prediction", 3),
-    rep("Validation", 4),
-    rep("Future (median across SSP×period)", nrow(shift_table))
-  ),
-  Metric = c(
-    "Feature class", "Regularization", "AUC", "TSS", "Kappa",
-    "Suitable area (km²)", "MESS extrapolation (%)", "Threshold (MaxSS)",
-    "East coast suitability", "Desert suitability",
-    "Schoener's D", "Warren's I",
-    paste0("Net change (", shift_table$scenario, ")")
-  ),
-  Value = c(
-    comparison$v2[comparison$Metric == "Feature class"],
-    comparison$v2[comparison$Metric == "Regularization (β)"],
-    as.character(metrics$Value[metrics$Metric == "AUC"]),
-    as.character(metrics$Value[metrics$Metric == "TSS"]),
-    as.character(metrics$Value[metrics$Metric == "Kappa"]),
-    comparison$v2[comparison$Metric == "Background sampling"],
-    sprintf("%.1f%%", 100 * global(mess_current < 0, sum, na.rm = TRUE)[[1]] /
-              global(!is.na(mess_current), sum)[[1]]),
-    sprintf("%.4f", primary_threshold),
-    validation$Value[1],
-    validation$Value[2],
-    sprintf("%.3f", niche_overlap$Value[1]),
-    sprintf("%.3f", niche_overlap$Value[2]),
-    sprintf("%+.0f km² (%+.1f%%)", shift_table$net_change_km2, shift_table$pct_change)
-  )
+# helper: safely extract a single value from a vector (collapse multiples, NA if missing)
+get_single <- function(vec) {
+  if (length(vec) == 0) return(NA_character_)
+  if (length(vec) > 1) return(paste(as.character(vec), collapse = "; "))
+  as.character(vec)
+}
+
+base_section <- c(
+  rep("Model", 5),
+  rep("Current prediction", 3),
+  rep("Validation", 4)
 )
+
+base_metric <- c(
+  "Feature class", "Regularization", "AUC", "TSS", "Kappa",
+  "Suitable area (km²)", "MESS extrapolation (%)", "Threshold (MaxSS)",
+  "East coast suitability", "Desert suitability",
+  "Schoener's D", "Warren's I"
+)
+
+base_value <- c(
+  get_single(comparison$v2[comparison$Metric == "Feature class"]),
+  get_single(comparison$v2[comparison$Metric == "Regularization (β)"]),
+  get_single(metrics$Value[metrics$Metric == "AUC"]),
+  get_single(metrics$Value[metrics$Metric == "TSS"]),
+  get_single(metrics$Value[metrics$Metric == "Kappa"]),
+  get_single(comparison$v2[comparison$Metric == "Background sampling"]),
+  # MESS extrapolation (single scalar)
+  sprintf("%.1f%%", 100 * global(mess_current < 0, sum, na.rm = TRUE)[[1]] /
+            global(!is.na(mess_current), sum)[[1]]),
+  # threshold
+  sprintf("%.4f", primary_threshold),
+  # validation (two entries)
+  get_single(validation$Value[1]),
+  get_single(validation$Value[2]),
+  get_single(sprintf("%.3f", niche_overlap$Value[1])),
+  get_single(sprintf("%.3f", niche_overlap$Value[2]))
+)
+
+# future rows built from shift_table (one row per scenario)
+future_section <- rep("Future (median across SSP×period)", nrow(shift_table))
+future_metric <- paste0("Net change (", shift_table$scenario, ")")
+future_value  <- sprintf("%+.0f km² (%+.1f%%)", shift_table$net_change_km2, shift_table$pct_change)
+
+# combine into one tibble (no recycling ambiguity)
+results_overview <- bind_rows(
+  tibble(Section = base_section, Metric = base_metric, Value = base_value),
+  tibble(Section = future_section, Metric = future_metric, Value = future_value)
+)
+
 
 write_csv(results_overview, file.path(outputs_dir, "results_overview_v2.csv"))
 
