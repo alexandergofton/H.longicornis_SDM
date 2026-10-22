@@ -1,0 +1,1361 @@
+---
+title: "From climatic suitability to management: livestock exposure, introduction risk, life-cycle processes, refugia, warming levels and surveillance design for *Haemaphysalis longicornis* in Australia"
+subtitle: "Extensions of the Australia-only current-climate (code_6) and future-climate (code_7) species distribution models"
+author:
+  - name: "Alexander W. Gofton"
+    affiliation: "CSIRO"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-dpi: 150
+    css: manuscript.css
+    df-print: kable
+execute:
+  warning: false
+  message: false
+  cache: false
+bibliography: references.bib
+link-citations: true
+crossref:
+  custom:
+    - kind: float
+      key: suppfig
+      reference-prefix: "Figure S"
+      caption-prefix: "Figure S"
+      space-before-numbering: false
+    - kind: float
+      key: supptbl
+      reference-prefix: "Table S"
+      caption-prefix: "Table S"
+      space-before-numbering: false
+---
+
+::: {.callout-note collapse="true"}
+## Guide to figures and tables
+
+Figures and tables proposed for the **main text** of a publication are boxed in
+<span style="color:#1b7837;font-weight:700">green</span> and numbered Figure 1, 2, ... / Table 1, 2, ....
+**Supplementary** figures and tables are boxed in <span style="color:#666;font-weight:700">grey</span>
+and collected in the Supplementary Material. All code is embedded (**Show code**). This document is the
+Australia-only version of `code_5/`. It builds on `code_6/` (current-climate model projected to continental
+Australia and Tasmania) and `code_7/` (future projections for the same domain); extension numbers follow
+the list in Section 5 of the `code_4`/`code_7` reports. The SDM is calibrated on all records, including
+those from New Zealand and the Pacific islands, but all outputs cover continental Australia and Tasmania.
+
+| Main text | Supplementary |
+|---|---|
+| @fig-livestock Livestock exposure and indicative cost (Ext. 1) | @suppfig-livemaps Cattle and sheep densities and the suitable range |
+| @fig-intro Introduction pressure and establishment risk (Ext. 2) | @suppfig-proccomp Components of the process-based model |
+| @fig-process Process-based model and seasonality (Ext. 3) | @suppfig-gwlmap Mapping of scenarios to warming levels |
+| @fig-refugia Microclimatic refugia in areas of loss (Ext. 4) | @suppfig-post Posterior probability of presence after surveillance |
+| @fig-gwl Projections at global warming levels (Ext. 5) | |
+| @fig-surv Risk-based surveillance design (Ext. 7) | |
+| @tbl-exposure Animals, people and cost exposed | @supptbl-procpar, @supptbl-procval, @supptbl-gravsens, @supptbl-survjur |
+| @tbl-gwl Change at global warming levels | @supptbl-refugia, @supptbl-gwlyear, @supptbl-catjur |
+| @tbl-surv Highest-priority surveillance units | |
+:::
+
+# Abstract {.unnumbered}
+
+::: {.abstract-box}
+**Aim.** To translate projections of climatic suitability for the Asian longhorned tick,
+*Haemaphysalis longicornis*, into outputs that support livestock and biosecurity management in
+continental Australia and Tasmania.
+
+**Methods.** Using the transfer-validated consensus SDM (calibrated on native and invaded-range
+records, including New Zealand and the Pacific islands) and its CMIP6 projections for Australia, we
+(1) quantified cattle, sheep and people in suitable climate and an indicative cost of theileriosis;
+(2) modelled introduction pressure via cattle movement with a gravity model and combined it with
+suitability to map establishment risk; (3) built a process-based model of life-cycle feasibility and
+seasonality from published thermal and moisture thresholds; (4) identified topographic, irrigation and
+tree-cover refugia within areas of projected loss; (5) expressed projections at global warming levels;
+and (7) optimised the allocation of surveillance effort.
+
+**Results.** About 5.9 million cattle, 9.3 million sheep and 15 million people in Australia are in
+climatically suitable areas. Cattle exposure falls by 21% by 2041–2060 (SSP2-4.5) and by 28–49% by
+2081–2100. Establishment risk is concentrated in the Western District of Victoria and on the New
+England Tablelands. The process model, parameterised entirely from the literature, reproduced the
+known distribution (AUC 0.91 for Australian records; 95% agreement with the SDM). It projected smaller
+losses than the SDM but a questing season 1.2–2.4 months longer in the core range. About one-tenth of
+the area projected to be lost contains topographic refugia. Suitable area declines by about 12%, 16%
+and 24% at 1.5, 2 and 3 °C of global warming. Risk-based surveillance was several times more efficient
+than uniform allocation, and placed most effort in western Victoria.
+
+**Main conclusions.** Future incursions of *H. longicornis* in Australia will be driven by livestock
+movement into suitable, uninfested areas rather than by climatic expansion. Disease control should be
+maintained throughout the persistent core and surveillance targeted at a few high-risk districts,
+with a precautionary allocation to Tasmania.
+:::
+
+**Keywords:** *Haemaphysalis longicornis*; *Theileria orientalis*; livestock exposure; introduction pressure; degree-days; saturation deficit; microrefugia; global warming levels; surveillance design; Australia
+
+```{r}
+#| label: setup
+#| cache: false
+#| code-summary: "Show code: packages, paths and helpers"
+options(java.parameters = "-Xmx4g")
+suppressPackageStartupMessages({
+  library(terra)
+  library(sf)
+  library(predicts)
+  library(envirem)
+  library(rnaturalearth)
+  library(tidyterra)
+  library(patchwork)
+  library(parallel)
+  library(matrixStats)
+  library(knitr)
+  library(tidyverse)
+})
+sf_use_s2(FALSE)
+options(knitr.kable.NA = "")
+
+base_dir <- normalizePath("..")                      # project root (this file lives in code_8/)
+proc_v2  <- file.path(base_dir, "processed_data_2")
+proc_v6  <- file.path(base_dir, "processed_data_6")  # current-climate model, Australian projection (code_6)
+proc_v7  <- file.path(base_dir, "processed_data_7")  # future projections, Australia (code_7)
+proc_v8  <- file.path(base_dir, "processed_data_8")
+out_dir  <- file.path(base_dir, "outputs_8")
+fig_dir  <- file.path(base_dir, "figures_8")
+dat_dir  <- file.path(base_dir, "data")
+cache_dir <- file.path(proc_v8, "cache")            # results of slow steps; delete to recompute
+for (d in c(proc_v8, out_dir, fig_dir, cache_dir)) dir.create(d, showWarnings = FALSE)
+terraOptions(memfrac = 0.6, tempdir = file.path(base_dir, "temp"), progress = 0)
+n_cores <- min(6, detectCores() - 1)
+cached <- function(name, expr, objects) {
+  f <- file.path(cache_dir, paste0(name, ".rds"))
+  if (file.exists(f)) { list2env(readRDS(f), envir = globalenv()); return(invisible(TRUE)) }
+  eval(substitute(expr), envir = globalenv())
+  saveRDS(mget(objects, envir = globalenv()), f)
+}
+
+theme_set(theme_minimal(base_size = 11) + theme(panel.grid.minor = element_blank()))
+sel_vars <- c("bio1", "bio2", "bio12", "bio13", "bio15", "bio17", "aridity_idx")
+var_lab  <- c(bio1 = "Annual mean temperature", bio2 = "Mean diurnal range", bio12 = "Annual precipitation",
+              bio13 = "Precip. wettest month", bio15 = "Precipitation seasonality",
+              bio17 = "Precip. driest quarter", aridity_idx = "Thornthwaite aridity index")
+ssps    <- c("126", "245", "370", "585")
+ssp_lab <- c("126" = "SSP1-2.6", "245" = "SSP2-4.5", "370" = "SSP3-7.0", "585" = "SSP5-8.5")
+ssp_col <- c("SSP1-2.6" = "#173C66", "SSP2-4.5" = "#F79420", "SSP3-7.0" = "#E71D25", "SSP5-8.5" = "#951B1E")
+periods <- c("2021-2040", "2041-2060", "2061-2080", "2081-2100")
+per_mid <- setNames(c(2030.5, 2050.5, 2070.5, 2090.5), periods)
+focal   <- c("245_2041-2060", "370_2081-2100")
+focal_lab <- c("245_2041-2060" = "SSP2-4.5 2041–2060", "370_2081-2100" = "SSP3-7.0 2081–2100")
+save_fig <- function(name, p = last_plot(), w = 8, h = 6)
+  ggsave(file.path(fig_dir, paste0(name, ".png")), p, width = w, height = h, dpi = 300, bg = "white")
+fmt <- function(x, d = 2) formatC(x, format = "f", digits = d)
+fmt_int <- function(x) format(round(x), big.mark = ",")
+sgn <- function(x) sub("^-", "−", sprintf("%+.0f", x))
+clamp01 <- function(x) pmin(pmax(x, 0), 1)
+auc_fun <- function(pp, pa) { r <- rank(c(pp, pa)); np <- length(pp); (sum(r[seq_len(np)]) - np * (np + 1) / 2) / (np * length(pa)) }
+hav_km <- function(lon1, lat1, lon2, lat2) {   # great-circle distance matrix (km)
+  r <- pi / 180; a <- outer(lat1 * r, lat2 * r, function(p1, p2) p1); b <- outer(lat1 * r, lat2 * r, function(p1, p2) p2)
+  dl <- outer(lon1 * r, lon2 * r, `-`)
+  2 * 6371 * asin(sqrt(pmin(1, sin((b - a) / 2)^2 + cos(a) * cos(b) * sin(dl / 2)^2)))
+}
+```
+
+# Introduction
+
+The current-climate model (`code_6`) and the future projections (`code_7`) describe where climate
+does and will permit *Haemaphysalis longicornis* to persist in continental Australia and Tasmania. The
+model is calibrated on records from the native range, North America, Australia, New Zealand and the
+Pacific islands, but its outputs are restricted to Australia. They show a persistent core in
+south-eastern Australia and Tasmania, and a range that contracts from its warm and dry margins as the
+climate warms. On their own, these results do not
+tell managers how many animals are affected, where the tick is most likely to be introduced next,
+how its seasonal activity will change, or where surveillance effort should go. This report extends
+the analysis in six of the directions proposed in `code_4`/`code_7` (numbering follows that list;
+extension 6, temporal validation, extension 8, pathogens and the wider region, and extension 9, model
+refinement, are not part of this stage):
+
+1. **Livestock and economic exposure:** the cattle, sheep and people in climatically suitable areas
+   now and under each scenario, with an indicative projection of the cost of theileriosis.
+2. **Introduction pressure:** a gravity model of tick movement with cattle from the infested range,
+   combined with suitability to map establishment risk.
+3. **A process-based model:** a temperature- and moisture-driven model of life-cycle feasibility and
+   seasonal activity. It provides an independent check on the correlative model and projects
+   changes in the number of generations and the length of the questing season.
+4. **Microclimatic refugia:** whether topography, irrigation or tree cover could allow the tick to
+   persist within areas projected to become climatically unsuitable.
+5. **Global warming levels:** projections expressed at 1.5, 2, 3 and 4 °C of global warming rather
+   than by emissions scenario and period.
+7. **Surveillance design:** risk-based allocation of a surveillance budget among suitable,
+   unrecorded areas, compared with simpler allocation rules.
+
+Only parthenogenetic populations of *H. longicornis* occur in Australia [@hoogstraal1968; @heath2016],
+so all analyses refer to the parthenogenetic form; no lineage comparison is made. Unless stated
+otherwise, all analyses use the consensus model, threshold, GCM ensemble and projections of `code_7`
+without modification.
+
+# Methods
+
+```{r}
+#| label: base-model
+#| code-summary: "Show code: consensus model, projection grid and code_7 projections"
+# Consensus model (code_3/code_6), its bootstrap replicates and threshold, as stored by code_7
+lam <- readRDS(file.path(proc_v7, "consensus_lambdas.rds"))
+L_final <- lam$final; thr_p10 <- lam$thr_p10
+mx_cloglog <- function(L, x, clamp = TRUE) {
+  s <- numeric(nrow(x))
+  for (j in seq_len(nrow(L$f))) {
+    ft <- L$f$feature[j]; lo <- L$f$min[j]; hi <- L$f$max[j]
+    val <- if (startsWith(ft, "'")) { v <- x[[substring(ft, 2)]]; ifelse(v <= lo, 0, (v - lo) / (hi - lo)) }
+      else if (startsWith(ft, "`")) { v <- x[[substring(ft, 2)]]; ifelse(v >= hi, 0, (hi - v) / (hi - lo)) }
+      else if (grepl("\\^2$", ft)) (x[[sub("\\^2$", "", ft)]]^2 - lo) / (hi - lo)
+      else if (grepl("\\*", ft)) { p <- strsplit(ft, "\\*")[[1]]; (x[[p[1]]] * x[[p[2]]] - lo) / (hi - lo) }
+      else (x[[ft]] - lo) / (hi - lo)
+    if (clamp) val <- pmin(pmax(val, 0), 1)
+    s <- s + L$f$lambda[j] * val
+  }
+  1 - exp(-exp(L$H) * exp(s - L$lpn) / L$dn)
+}
+ens_pred <- function(Ls, x) rowMeans(sapply(Ls, mx_cloglog, x = as.data.frame(x)))
+
+# Projection grid (continental Australia + Tasmania), cell areas, states and known records (as in code_6/code_7)
+cur_suit <- rast(file.path(proc_v6, "suitability_current_aus.tif"))
+cells    <- which(!is.na(values(cur_suit)))
+p_cur    <- values(cur_suit)[cells]
+bin_cur  <- p_cur >= thr_p10
+area_km2 <- values(cellSize(cur_suit, unit = "km"))[cells]
+xy_cells <- xyFromCell(cur_suit, cells)
+to_rast  <- function(v, nm = "value") { r <- rast(cur_suit); r[cells] <- v; names(r) <- nm; r }
+env_all  <- rast(file.path(proc_v2, "env_all_global.tif"))
+env_cur  <- as.data.frame(values(mask(crop(env_all[[sel_vars]], cur_suit), cur_suit))[cells, sel_vars])
+
+jur <- ne_states(country = "Australia", returnclass = "sf") |>
+  filter(!name %in% c("Lord Howe Island", "Macquarie Island")) |>
+  mutate(jur = if_else(name == "Jervis Bay Territory", "New South Wales", name)) |>
+  group_by(jur) |> summarise(geometry = st_union(geometry), .groups = "drop")
+aus_sf <- jur
+jur_r  <- rasterize(vect(jur), cur_suit, field = "jur")
+jur_c  <- levels(jur_r)[[1]]$jur[match(values(jur_r)[cells], levels(jur_r)[[1]][[1]])]
+miss   <- which(is.na(jur_c))
+if (length(miss)) jur_c[miss] <- jur$jur[st_nearest_feature(st_as_sf(as.data.frame(xy_cells[miss, , drop = FALSE]), coords = c("x", "y"), crs = 4326), jur)]
+country_c <- rep("Australia", length(cells))          # single reporting unit (kept for consistency with code_5)
+
+occ <- read_csv(file.path(proc_v2, "occurrences_with_climate.csv"), show_col_types = FALSE) |>
+  mutate(region = if_else(region == "Other", "East_Asia", region))
+known_aus  <- read_csv(file.path(proc_v6, "known_records_aus.csv"), show_col_types = FALSE)   # training + ALA records on Australian land
+known_cell <- unique(match(cellFromXY(cur_suit, as.matrix(known_aus)), cells)); known_cell <- known_cell[!is.na(known_cell)]
+
+# Future projections from code_7: per-scenario suitability (x 1e4) for 168 scenarios, ensemble-median climate
+scen <- bind_rows(
+  expand_grid(gcm = c("ACCESS-CM2", "ACCESS-ESM1-5", "CMCC-ESM2", "CNRM-ESM2-1", "EC-Earth3-Veg",
+                      "GISS-E2-1-G", "IPSL-CM6A-LR", "MIROC6", "MPI-ESM1-2-HR", "MRI-ESM2-0"),
+              ssp = ssps, period = periods, set = "core"),
+  expand_grid(gcm = c("UKESM1-0-LL", "CNRM-CM6-1"), ssp = c("245", "585"),
+              period = c("2041-2060", "2081-2100"), set = "v2_only")) |>
+  mutate(id = sprintf("%s_ssp%s_%s", gcm, ssp, period), ssp_l = factor(ssp_lab[ssp], levels = ssp_lab),
+         period = factor(period, levels = periods), key = sprintf("%s_%s", ssp, period))
+p4 <- readRDS(file.path(proc_v7, "cache", "projections.rds"))
+S  <- p4$S[, scen$id]; rm(p4)
+summ4 <- read_csv(file.path(base_dir, "outputs_7", "scenario_summaries_all.csv"), show_col_types = FALSE)
+B  <- S >= round(thr_p10 * 1e4)                        # per-GCM binary suitability
+core_id <- scen$id[scen$set == "core"]
+agree <- function(k) rowMeans(B[, scen$id[scen$set == "core" & scen$key == k], drop = FALSE])
+x_med <- lapply(readRDS(file.path(proc_v7, "cache", "drivers.rds"))$drv, `[[`, "x_med")   # focal scenarios
+
+# Common map styling
+map_base <- list(coord_sf(xlim = c(112.5, 154), ylim = c(-44, -9.5), expand = FALSE), labs(x = NULL, y = NULL),
+                 theme(panel.background = element_rect(fill = "#f4f8fb", colour = NA), axis.text = element_blank(),
+                       panel.grid = element_blank()))
+map_df <- function(vals, keys, fact = 2, fun = "mean") imap_dfr(vals, function(v, k) {
+  r <- to_rast(v); if (fact > 1) r <- aggregate(r, fact, fun = fun, na.rm = TRUE)
+  as.data.frame(r, xy = TRUE, na.rm = TRUE) |> mutate(key = k) }) |> left_join(keys, by = "key")
+```
+
+## Inputs from the previous analyses
+
+All extensions reuse the `code_3`/`code_6` consensus MaxEnt model (three members; 10th-percentile
+training-presence threshold, cloglog = `r fmt(thr_p10, 3)`) and the `code_7` projections for ten
+CMIP6 GCMs, four SSPs and four periods. Per-GCM binary suitability, GCM agreement and the
+ensemble-median future climate of the two focal scenarios (SSP2-4.5 2041–2060 and SSP3-7.0
+2081–2100) were read from `processed_data_7/`. Known records comprise the training records and
+georeferenced ALA records on Australian land (`r nrow(known_aus)` points).
+
+```{r}
+#| label: prep-data
+#| code-summary: "Show code: additional data (shared with code_5; prepared by code_5/prep_extension_data.R)"
+# The additional data are stored on the Australia/NZ window used by code_5 and are cropped here to the Australian grid
+mon_dir <- file.path(dat_dir, "future_climate_cmip6_monthly")
+wc_dir  <- file.path(dat_dir, "worldclim", "climate", "wc2.1_2.5m")
+gcm_core <- c("ACCESS-CM2", "ACCESS-ESM1-5", "CMCC-ESM2", "CNRM-ESM2-1", "EC-Earth3-Veg",
+              "GISS-E2-1-G", "IPSL-CM6A-LR", "MIROC6", "MPI-ESM1-2-HR", "MRI-ESM2-0")
+scen_m <- bind_rows(expand_grid(gcm = gcm_core, ssp = c("245", "370"), period = c("2041-2060", "2081-2100")),
+                    expand_grid(gcm = gcm_core, ssp = "245", period = "2021-2040")) |>
+  mutate(id = sprintf("%s_ssp%s_%s", gcm, ssp, period),
+         f_aunz = file.path(mon_dir, paste0(id, "_tmin_tmax_aunz.tif")))
+needed <- c(scen_m$f_aunz, file.path(wc_dir, sprintf("wc2.1_2.5m_vapr_%02d.tif", 1:12)),
+            file.path(dat_dir, "population_gpw4", "gpw_v4_population_count_2020_2.5m_aunz.tif"),
+            file.path(dat_dir, "landcover_worldcover", "WorldCover_trees_30s_aunz.tif"),
+            file.path(dat_dir, "elevation_30s", "elevation_30s_aunz.tif"),
+            file.path(dat_dir, "livestock_glw3", c("GLW3_cattle_2010_Da.tif", "GLW3_sheep_2010_Da.tif")),
+            file.path(dat_dir, "irrigation_gmia5", "gmia_v5_aei_pct.asc"))
+if (!all(file.exists(needed)))
+  stop("Missing input data; run code_5/prep_extension_data.R first (see code_5/README.md):\n",
+       paste(needed[!file.exists(needed)], collapse = "\n"))
+```
+
+## Additional data
+
+The process-based model (Extension 3) required future monthly temperatures, which were not retained
+in `code_4`/`code_7`. Monthly minimum and maximum temperature and
+precipitation were therefore obtained again from the WorldClim 2.1 CMIP6 downscaled projections
+[@fick2017] for the ten core GCMs and three scenario-periods: SSP2-4.5 2021–2040, SSP2-4.5 and
+SSP3-7.0 for 2041–2060, and SSP2-4.5 and SSP3-7.0 for 2081–2100 (50 GCM × scenario combinations).
+Livestock densities for 2010 (cattle and sheep, heads per 5′ cell) were taken from the Gridded
+Livestock of the World v3 [@gilbert2018]. Human population density for 2020 came from the Gridded
+Population of the World v4 [@ciesin2018]. Area equipped for irrigation was taken from the Global Map
+of Irrigation Areas v5 [@siebert2013]. Fractional tree, grassland and cropland cover at 30″ came from
+ESA WorldCover 2020 [@zanaga2021], and 30″ elevation from SRTM. Current monthly vapour pressure came
+from WorldClim 2.1.
+
+```{r}
+#| label: e1-livestock
+#| code-summary: "Show code: Extension 1"
+# Gridded Livestock of the World 3 (2010, dasymetric heads per 5' pixel) disaggregated to the 2.5' grid
+glw <- function(f) { r <- crop(rast(file.path(dat_dir, "livestock_glw3", f)), ext(cur_suit))
+  values(disagg(r, 2) / 4)[cells] }
+cattle_c <- glw("GLW3_cattle_2010_Da.tif"); cattle_c[is.na(cattle_c)] <- 0
+sheep_c  <- glw("GLW3_sheep_2010_Da.tif");  sheep_c[is.na(sheep_c)] <- 0
+pop_c    <- values(crop(rast(file.path(dat_dir, "population_gpw4", "gpw_v4_population_count_2020_2.5m_aunz.tif")), cur_suit))[cells]
+pop_c[is.na(pop_c)] <- 0
+glw_aus <- function(f) global(mask(crop(rast(file.path(dat_dir, "livestock_glw3", f)), ext(cur_suit)), vect(jur), touches = TRUE),
+                               "sum", na.rm = TRUE)[[1]]                      # all GLW3 animals in Australian states
+glw_tot <- c(cattle = glw_aus("GLW3_cattle_2010_Da.tif"), sheep = glw_aus("GLW3_sheep_2010_Da.tif"))
+
+# Animals and people in climatically suitable areas: current and every scenario (per GCM)
+expo_by <- function(w, g) {
+  cur <- tapply(w * bin_cur, g, sum)
+  fut <- sapply(split(seq_along(g), g), function(i) colSums(B[i, , drop = FALSE] * w[i]))
+  list(cur = cur, fut = fut)
+}
+expo <- map_dfr(list(Cattle = cattle_c, Sheep = sheep_c, People = pop_c), function(w) {
+  e <- expo_by(w, country_c)
+  as_tibble(e$fut) |> mutate(id = scen$id) |> pivot_longer(-id, names_to = "unit", values_to = "exposed") |>
+    left_join(tibble(unit = names(e$cur), exposed_cur = as.numeric(e$cur)), by = "unit")
+}, .id = "group") |> left_join(dplyr::select(scen, id, gcm, ssp, ssp_l, period, set, key), by = "id") |>
+  mutate(pct_change = 100 * (exposed - exposed_cur) / exposed_cur)
+expo_ens <- expo |> filter(set == "core") |> group_by(group, unit, ssp, ssp_l, period) |>
+  summarise(exposed_cur = first(exposed_cur), med = median(exposed), lo = min(exposed), hi = max(exposed),
+            pct_med = median(pct_change), pct_lo = min(pct_change), pct_hi = max(pct_change), .groups = "drop")
+write_csv(expo_ens, file.path(out_dir, "livestock_people_exposure.csv"))
+
+# Exposure by jurisdiction (cattle) and by management category for the focal scenarios
+cat_jur <- expo_by(cattle_c, jur_c)
+mgmt <- function(f) ifelse(bin_cur, ifelse(f >= 0.8, "Persistent (robust)", ifelse(f <= 0.2, "Likely loss", "At risk (uncertain)")),
+                           ifelse(f >= 0.8, "Emerging (robust)", ifelse(f >= 0.5, "Emerging (possible)", "Unsuitable")))
+mg_cattle <- map_dfr(focal, function(k) tibble(scenario = focal_lab[k], class = mgmt(agree(k)), unit = country_c,
+                                                cattle = cattle_c, sheep = sheep_c) |>
+  group_by(scenario, unit, class) |> summarise(cattle = sum(cattle), sheep = sum(sheep), .groups = "drop"))
+
+# Indicative cost: MLA (Shephard et al. 2022) estimate of AUD 18.8M per year for theileriosis in Australian
+# cattle, apportioned per head of cattle in currently suitable climate and scaled with projected exposure
+cost_au   <- 18.8e6
+cost_head <- cost_au / sum(cattle_c[country_c == "Australia" & bin_cur])
+cost_proj <- expo |> filter(group == "Cattle", unit == "Australia", set == "core") |>
+  mutate(cost = exposed * cost_head) |> group_by(ssp_l, period) |>
+  summarise(med = median(cost), lo = min(cost), hi = max(cost), .groups = "drop")
+```
+
+## Extension 1: livestock, human and economic exposure
+
+GLW cattle and sheep counts were split equally among the four 2.5′ cells within each 5′ cell. For
+each of the 168 `code_7` scenario projections, we summed the animals and people in cells classified as
+suitable by each GCM, and report the median and range across GCMs. Cattle were also tallied by the
+management categories of `code_7` (persistent, at risk, likely loss). The cost of theileriosis
+(*Theileria orientalis*, transmitted by *H. longicornis*) to Australian cattle producers was most
+recently estimated at AUD 18.8 million per year [@shephard2022]. As an indicative projection, we
+divided this cost by the number of cattle in currently suitable climate in Australia (giving a cost
+per exposed head) and multiplied by the projected number of exposed cattle. This assumes that cost
+per exposed animal, herd distribution, prices and disease dynamics stay constant, and it excludes
+the dairy sector, which the MLA estimate does not cover. It is an index of how exposure changes,
+not a forecast of cost.
+
+```{r}
+#| label: e2-introduction
+#| code-summary: "Show code: Extension 2"
+# Gravity model of introduction pressure from infested areas via cattle movement, on a 0.25-degree grid
+agg6 <- function(v, fun = "sum") aggregate(to_rast(v), 6, fun = fun, na.rm = TRUE)
+u_cattle <- agg6(cattle_c); u_area <- agg6(area_km2)
+u_suit   <- agg6(bin_cur * area_km2) / u_area                                 # fraction of unit suitable now
+u_fut    <- lapply(setNames(focal, focal), function(k) agg6(agree(k) * area_km2) / u_area)   # GCM-weighted
+known_r  <- rasterize(as.matrix(known_aus[, c("lon", "lat")]), u_area, fun = "count", background = 0)
+units <- as.data.frame(c(u_area, u_cattle, u_suit, u_fut[[1]], u_fut[[2]], mask(known_r, u_area)), xy = TRUE, na.rm = TRUE)
+names(units) <- c("x", "y", "area", "cattle", "suit_cur", "suit_245_2050", "suit_370_2090", "n_known")
+units <- units |> filter(area > 50)
+pts_u <- st_as_sf(units, coords = c("x", "y"), crs = 4326)
+units$jur <- jur$jur[st_nearest_feature(pts_u, jur)]
+units$landmass <- if_else(units$jur == "Tasmania", "Tasmania", "Mainland")
+# Infested (source) units: suitable now and within 100 km of a known record (the occupied range as defined in code_6)
+d_known <- terra::extract(distance(u_area, vect(known_aus, geom = c("lon", "lat"), crs = "EPSG:4326")) / 1000, as.matrix(units[, c("x", "y")]))[[1]]
+units$infested <- d_known <= 100 & units$suit_cur > 0
+units$d_known  <- d_known
+D <- hav_km(units$x, units$y, units$x[units$infested], units$y[units$infested])   # km, units x sources
+sea_pen <- function(pen) outer(units$landmass, units$landmass[units$infested], function(a, b)
+  ifelse(a == b, 1, pen))                                          # same landmass 1; Bass Strait crossing pen
+penalty <- sea_pen(0.1)
+press <- function(gamma = 2, d0 = 50, pen = penalty) {
+  K <- (1 + D / d0)^(-gamma) * pen
+  K[cbind(which(units$infested), seq_len(sum(units$infested)))] <- 0             # no self-supply
+  as.numeric(K %*% units$cattle[units$infested])
+}
+units$pressure <- press()
+units$intro    <- units$pressure * units$cattle / max(units$pressure * units$cattle)  # relative expected introductions
+units <- units |> mutate(risk_cur = intro * suit_cur, risk_245_2050 = intro * suit_245_2050, risk_370_2090 = intro * suit_370_2090)
+top_k <- function(r, k = 100) order(-r)[seq_len(k)]
+sens_gamma <- map_dfr(list(c(1, 50), c(1.5, 50), c(3, 50), c(2, 25), c(2, 100)), function(g) {
+  pr <- press(gamma = g[1], d0 = g[2]); r <- pr * units$cattle * units$suit_cur; un <- !units$infested
+  tibble(gamma = g[1], d0 = g[2], rho_pressure = cor(pr[un], units$pressure[un], method = "spearman"),
+         top100_overlap = length(intersect(top_k(r[un]), top_k(units$risk_cur[un]))) / 100)
+}) |> bind_rows(local({ pr <- press(pen = sea_pen(0.5)); un <- !units$infested; r <- pr * units$cattle * units$suit_cur
+  tibble(gamma = 2, d0 = 50, rho_pressure = cor(pr[un], units$pressure[un], method = "spearman"),
+         top100_overlap = length(intersect(top_k(r[un]), top_k(units$risk_cur[un]))) / 100, sea_penalty = 0.5) }))
+risk_tas_pen05 <- local({ pr <- press(pen = sea_pen(0.5)); r <- pr * units$cattle * units$suit_cur * !units$infested
+  sum(r[units$jur == "Tasmania"]) / sum(r) })
+risk_tas_pen01 <- with(units, sum((risk_cur * !infested)[jur == "Tasmania"]) / sum(risk_cur * !infested))
+write_csv(units, file.path(out_dir, "introduction_establishment_risk_units.csv"))
+```
+
+## Extension 2: introduction pressure and establishment risk
+
+Long-distance spread of *H. longicornis* within Australia occurs mainly through
+movements of infested livestock [@heath2016]. Animal-level movement records (NLIS) are not
+publicly available, so introduction pressure was approximated with a gravity model on a 0.25° grid.
+Units that were suitable now and lay within 100 km of a known record were treated as infested
+sources (`code_6` definition of the occupied range). The pressure on unit *j* was
+*P*~*j*~ = Σ~*i*~ *C*~*i*~ (1 + *d*~*ij*~/*d*~0~)^−γ^ *s*~*ij*~, where *C*~*i*~ is the number of cattle in
+source unit *i*, *d*~*ij*~ the great-circle distance, *d*~0~ = 50 km and γ = 2. This heavy-tailed kernel
+reflects the long-distance movements typical of cattle trade. *s*~*ij*~ = 1 within a landmass and 0.1
+between mainland Australia and Tasmania (a Bass Strait crossing). The expected number of introductions into unit *j* was taken as
+proportional to *P*~*j*~ × *C*~*j*~ (the destination herd), and establishment risk as that quantity
+multiplied by the fraction of the unit that is climatically suitable, now or in 2041–2060
+(SSP2-4.5, weighted by GCM agreement). Sensitivity to γ, *d*~0~ and the sea-crossing penalty was
+assessed by rank correlation and by overlap of the 100 highest-risk units.
+
+```{r}
+#| label: e3-process-model
+#| code-summary: "Show code: Extension 3"
+# Process-based (degree-day and saturation-deficit) model of H. longicornis life-cycle feasibility
+stage <- tibble(stage = c("Pre-oviposition + oviposition", "Egg incubation", "Larval moult", "Nymphal moult"),
+                T0 = c(11.1, 12.2, 10.2, 11.8),            # Yano et al. (1987)
+                days25 = c(7, 25, 14, 17)) |>              # durations at 25 C (Heath 2016; Tian & Kaufman 2019; pre-oviposition assumed)
+  mutate(K = days25 * (25 - T0))
+mdays <- c(31, 28.25, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+dd_sine <- function(tn, tx, T0) {                         # mean daily degree-days above T0, single-sine method
+  a <- pmax((tx - tn) / 2, 1e-6); m <- (tx + tn) / 2
+  th <- asin(pmin(pmax((T0 - m) / a, -1), 1))
+  out <- ((m - T0) * (pi / 2 - th) + a * cos(th)) / pi
+  i1 <- which(tn >= T0); out[i1] <- (m - T0)[i1]; out[which(tx <= T0)] <- 0
+  out
+}
+es_kpa <- function(t) 0.6108 * exp(17.27 * t / (t + 237.3))
+proc_model <- function(tn, tx, ea, K_mult = 1, sd_larva = 10, sd_adult = 20, heat = 35, M_min = 4, sd_at = "max", D_max = 3) {
+  tm <- (tn + tx) / 2; tt <- if (sd_at == "max") tx else tm             # desiccation evaluated at the daily maximum
+  dd <- sapply(seq_len(nrow(stage)), function(s) rowSums(sweep(dd_sine(tn, tx, stage$T0[s]), 2, mdays, "*")))
+  gen_time <- rowSums(sweep(1 / pmax(dd, 1e-6), 2, stage$K * K_mult, "*"))   # years per generation
+  G  <- 1 / gen_time
+  sd <- (es_kpa(tt) - pmin(ea, es_kpa(tt))) * 7.50062                         # saturation deficit, mmHg
+  active <- tm >= min(stage$T0)
+  M_l <- rowSums(active & sd <= sd_larva)                                     # months suitable for larval questing
+  M_a <- rowSums(tm >= 10 & sd <= sd_adult)                                   # nymph/adult questing season
+  H   <- rowSums(tx >= heat)                                                  # months with mean daily max >= 35 C
+  D   <- rowSums(sd > sd_adult)                                               # dry months beyond nymph/adult tolerance
+  f_dry <- if (is.na(D_max)) 1 else clamp01(1 - D / D_max)
+  P   <- clamp01((G - 1/3) / (1 - 1/3)) * clamp01(M_l / M_min) * clamp01(1 - H / 3) * f_dry
+  tibble(G = G, M_l = M_l, M_a = M_a, H = H, D = D, P = P)
+}
+wc_dir <- file.path(dat_dir, "worldclim", "climate", "wc2.1_2.5m")
+mon_files <- function(v) file.path(wc_dir, sprintf("wc2.1_2.5m_%s_%02d.tif", v, 1:12))
+cached("process_current", {
+  cur_m <- lapply(c(tn = "tmin", tx = "tmax", ea = "vapr"), function(v) values(crop(rast(mon_files(v)), cur_suit))[cells, ])
+  pm_cur <- proc_model(cur_m$tn, cur_m$tx, cur_m$ea)
+  # Validation at occurrence records and evaluation background (code_6, identical to code_3) across all regions
+  bg_eval <- read_csv(file.path(proc_v6, "background_eval.csv"), show_col_types = FALSE)
+  in_aus  <- function(d) !is.na(terra::extract(cur_suit, as.matrix(d[, c("lon", "lat")]))[, 1])
+  pts <- bind_rows(occ |> transmute(lon, lat, region, type = 1), bg_eval |> transmute(lon, lat, region, type = 0))
+  pm_pts <- lapply(c(tn = "tmin", tx = "tmax", ea = "vapr"), function(v) as.matrix(terra::extract(rast(mon_files(v)), as.matrix(pts[, c("lon", "lat")]))))
+  ok <- complete.cases(do.call(cbind, pm_pts))
+  pm_val <- bind_cols(pts[ok, ], proc_model(pm_pts$tn[ok, ], pm_pts$tx[ok, ], pm_pts$ea[ok, ])) |>
+    mutate(australia = in_aus(pick(lon, lat)))
+  sens_spec <- bind_rows(expand_grid(sd_at = "max", K_mult = c(0.7, 1, 1.3), sd_larva = c(8, 10, 15), M_min = 4, sd_adult = 20, D_max = 3),
+                         expand_grid(sd_at = "max", K_mult = 1, sd_larva = 10, M_min = c(3, 6), sd_adult = 20, D_max = 3),
+                         tibble(sd_at = "max", K_mult = 1, sd_larva = 10, M_min = 4, sd_adult = c(25, 20, 20), D_max = c(3, 6, NA)),
+                         tibble(sd_at = "mean", K_mult = 1, sd_larva = 10, M_min = 4, sd_adult = 20, D_max = 3))
+  sens_K <- pmap_dfr(sens_spec, function(sd_at, K_mult, sd_larva, M_min, sd_adult, D_max) {
+    Pc <- proc_model(cur_m$tn, cur_m$tx, cur_m$ea, K_mult = K_mult, sd_larva = sd_larva, M_min = M_min, sd_at = sd_at, sd_adult = sd_adult, D_max = D_max)$P
+    Pp <- proc_model(pm_pts$tn[ok, ], pm_pts$tx[ok, ], pm_pts$ea[ok, ], K_mult = K_mult, sd_larva = sd_larva, M_min = M_min, sd_at = sd_at, sd_adult = sd_adult, D_max = D_max)$P
+    ty <- pts$type[ok]
+    tibble(sd_at, K_mult, sd_larva, M_min, sd_adult, D_max, auc = auc_fun(Pp[ty == 1], Pp[ty == 0]),
+           area_P05 = sum(area_km2 * (Pc >= 0.5)), agree_sdm = mean((Pc >= 0.5) == bin_cur), known_ok = mean(Pc[known_cell] >= 0.5))
+  })
+}, c("cur_m", "pm_cur", "pm_val", "sens_K"))
+pm_auc <- pm_val |> group_by(region) |> summarise(auc_P = auc_fun(P[type == 1], P[type == 0]),
+                                                  auc_G = auc_fun(G[type == 1], G[type == 0]), n = sum(type), .groups = "drop") |>
+  bind_rows(tibble(region = "All", auc_P = auc_fun(pm_val$P[pm_val$type == 1], pm_val$P[pm_val$type == 0]),
+                   auc_G = auc_fun(pm_val$G[pm_val$type == 1], pm_val$G[pm_val$type == 0]), n = sum(pm_val$type)),
+            pm_val |> filter(australia) |> summarise(region = "Australia (subset of Oceania)", auc_P = auc_fun(P[type == 1], P[type == 0]),
+                                                     auc_G = auc_fun(G[type == 1], G[type == 0]), n = sum(type)))
+thr_P <- 0.5                                                   # a priori: at least half of the maximum index
+pm_agree <- c(spearman = cor(pm_cur$P, p_cur, method = "spearman"), binary = mean((pm_cur$P >= thr_P) == bin_cur),
+              known_ok = mean(pm_cur$P[known_cell] >= thr_P))
+
+# Future: monthly tmin/tmax from each GCM; vapour pressure scaled assuming constant relative humidity at Tmin
+cached("process_future", {
+  pm_fut <- mclapply(seq_len(nrow(scen_m)), function(i) {
+    m <- values(crop(rast(scen_m$f_aunz[i]), cur_suit))[cells, ] / 10
+    na <- !complete.cases(m); m[na, ] <- cbind(cur_m$tn, cur_m$tx)[na, ]
+    tn <- m[, 1:12]; tx <- m[, 13:24]
+    ea <- cur_m$ea * es_kpa(tn) / es_kpa(cur_m$tn)
+    proc_model(tn, tx, ea)
+  }, mc.cores = n_cores)
+  names(pm_fut) <- scen_m$id
+}, c("pm_fut"))
+pm_ens <- map(setNames(unique(paste(scen_m$ssp, scen_m$period, sep = "_")), unique(paste(scen_m$ssp, scen_m$period, sep = "_"))), function(k) {
+  ids <- scen_m$id[paste(scen_m$ssp, scen_m$period, sep = "_") == k]
+  list(P = rowMedians(sapply(pm_fut[ids], `[[`, "P")), G = rowMedians(sapply(pm_fut[ids], `[[`, "G")),
+       M_a = rowMedians(sapply(pm_fut[ids], `[[`, "M_a")), M_l = rowMedians(sapply(pm_fut[ids], `[[`, "M_l")),
+       agreeP = rowMeans(sapply(pm_fut[ids], `[[`, "P") >= thr_P))
+})
+pm_summary <- map_dfr(names(pm_ens), function(k) {
+  e <- pm_ens[[k]]; core <- bin_cur & agree(k) >= 0.8
+  tibble(key = k, area_P = sum(area_km2 * (e$agreeP >= 0.5)), area_P_cur = sum(area_km2 * (pm_cur$P >= thr_P)),
+         dG_core = weighted.mean(e$G[core] - pm_cur$G[core], area_km2[core]),
+         dMa_core = weighted.mean(e$M_a[core] - pm_cur$M_a[core], area_km2[core]),
+         dMl_core = weighted.mean(e$M_l[core] - pm_cur$M_l[core], area_km2[core]),
+         sdm_loss_also_proc = { l <- bin_cur & agree(k) < 0.5; sum(area_km2[l & e$agreeP < 0.5]) / sum(area_km2[l]) })
+})
+```
+
+## Extension 3: process-based model of life-cycle feasibility and seasonality
+
+The process-based model represents the two constraints on off-host survival and development:
+temperature-driven development and moisture-limited survival [@needham1991; @ogden2016]. Stage-specific
+lower developmental thresholds were taken from @yano1987: 11.1 °C for pre-oviposition and
+oviposition, 12.2 °C for egg incubation, 10.2 °C for the larval moult and 11.8 °C for the nymphal
+moult. Thermal constants were derived from stage durations at 25 °C: egg incubation about 25 d,
+larval moult 14 d, nymphal moult 17 d [@heath2016, summarised by @schappach2020], and
+pre-oviposition plus oviposition assumed at 7 d (@supptbl-procpar). Daily degree-days above each
+threshold were calculated from monthly mean minimum and maximum temperatures with the single-sine
+method, and the generation rate *G* (generations per year) was the reciprocal of the summed ratios
+of thermal constant to annual degree-days. Desiccation was represented by the saturation deficit at
+the mean daily maximum temperature, calculated from WorldClim vapour pressure. In the future, vapour
+pressure was scaled with saturation vapour pressure at the minimum temperature, which assumes
+constant relative humidity at dawn. A month was considered suitable for larval questing if mean
+temperature exceeded the lowest developmental threshold and the saturation deficit was ≤ 10 mmHg,
+the upper tolerance of unfed and fed larvae [@heath2016]. Months with a mean daily maximum ≥ 35 °C
+were counted as heat-stress months (temperatures above about 40 °C are lethal; @heath2016). Drought
+is the main threat to off-host survival [@heath2016], so months in which the saturation deficit
+exceeded 20 mmHg, the upper tolerance of nymphs and adults, were counted as dry-stress months. The
+process index was *P* = *f*~dev~(*G*) × *f*~moist~ × *f*~heat~ × *f*~dry~. Here *f*~dev~ rises linearly
+from 0 at *G* = 1/3 (a three-year life cycle) to 1 at *G* ≥ 1; *f*~moist~ rises from 0 to 1 as the
+number of larval-questing months goes from 0 to 4; and *f*~heat~ and *f*~dry~ each fall from 1 to 0 as
+heat-stress or dry-stress months go from 0 to 3. Cells with *P* ≥ 0.5 were classified as physiologically suitable. The questing season
+of nymphs and adults was defined as the number of months with mean temperature ≥ 10 °C and
+saturation deficit ≤ 20 mmHg.
+
+The parameters were fixed from the literature rather than fitted to occurrence data. Two structural
+choices were made after inspecting a first version of the model, and we report both openly. First,
+the saturation deficit was computed at maximum rather than mean daily temperature, because this
+reflects afternoon questing conditions and discriminated occurrences better. Second, the dry-stress
+term was added because without it the model classified the semi-arid wheat-sheep zone as suitable,
+contrary to the known distribution. The versions without these choices are included in the
+sensitivity analysis.
+The model was evaluated by its ability to separate the occurrence records from the `code_3`/`code_6`
+evaluation background in each region and in Australia alone (AUC), and by its agreement with the SDM. Sensitivity to the
+thermal constants (±30%), the larval moisture threshold (8–15 mmHg), the required number of
+questing months and the formulation of the saturation deficit is reported.
+
+```{r}
+#| label: e4-refugia
+#| code-summary: "Show code: Extension 4"
+# Topoclimatic refugia: lapse-rate downscaling of annual mean temperature to 30" within each 2.5' cell
+cached("refugia", {
+  e30   <- crop(rast(file.path(dat_dir, "elevation_30s", "elevation_30s_aunz.tif")), cur_suit)
+  e30   <- resample(e30, disagg(rast(cur_suit), 5), method = "near")         # exact 5 x 5 nesting
+  parent <- cellFromXY(cur_suit, xyFromCell(e30, seq_len(ncell(e30))))
+  z  <- values(e30)[, 1]
+  keep <- which(!is.na(z) & !is.na(match(parent, cells[bin_cur])))          # sub-cells of currently suitable cells
+  pc <- match(parent[keep], cells)
+  dz <- z[keep] - ave(z[keep], pc)                                            # elevation relative to cell mean
+  sub_suit <- function(xc, lapse = 0.0065) {
+    x <- as.data.frame(xc[pc, , drop = FALSE]); x$bio1 <- x$bio1 - lapse * dz
+    ens_pred(L_final, x) >= thr_p10
+  }
+  frac <- function(b) { f <- rep(NA_real_, length(cells)); f[unique(pc)] <- tapply(b, pc, mean)[as.character(unique(pc))]; f }
+  ref_frac <- list(current = frac(sub_suit(as.matrix(env_cur))))
+  for (k in focal) {
+    ref_frac[[k]] <- frac(sub_suit(x_med[[k]]))
+    ref_frac[[paste0(k, "_lapse5")]] <- frac(sub_suit(x_med[[k]], lapse = 0.005))
+  }
+}, c("ref_frac"))
+# Irrigation (GMIA v5, % area equipped, 5') and tree cover (WorldCover 30", %) per 2.5' cell
+irr <- rast(file.path(dat_dir, "irrigation_gmia5", "gmia_v5_aei_pct.asc")); crs(irr) <- "EPSG:4326"
+irr_c <- values(disagg(crop(irr, ext(cur_suit)), 2))[cells]; irr_c[is.na(irr_c)] <- 0
+tree_c <- values(aggregate(crop(rast(file.path(dat_dir, "landcover_worldcover", "WorldCover_trees_30s_aunz.tif")), cur_suit),
+                           5, mean, na.rm = TRUE))[cells]
+tree_c[is.na(tree_c)] <- 0
+refugia_class <- function(k) {
+  loss <- bin_cur & agree(k) < 0.5
+  topo <- loss & ref_frac[[k]] >= 0.1; irri <- loss & irr_c >= 5; tree <- loss & tree_c >= 30
+  cls <- ifelse(!loss, NA, ifelse(topo & (irri | tree), "Topographic + land cover/irrigation",
+                ifelse(topo, "Topographic", ifelse(irri, "Irrigation", ifelse(tree, "Tree cover", "No refuge identified")))))
+  cls
+}
+ref_tab <- map_dfr(focal, function(k) tibble(scenario = focal_lab[k], cls = refugia_class(k), area = area_km2,
+                                              cattle = cattle_c, unit = country_c) |>
+  filter(!is.na(cls)) |> group_by(scenario, unit, cls) |> summarise(area = sum(area), cattle = sum(cattle), .groups = "drop"))
+ref_lapse <- map_dfr(focal, function(k) { loss <- bin_cur & agree(k) < 0.5
+  tibble(scenario = focal_lab[k], lapse6.5 = sum(area_km2[loss & ref_frac[[k]] >= 0.1], na.rm = TRUE),
+         lapse5.0 = sum(area_km2[loss & ref_frac[[paste0(k, "_lapse5")]] >= 0.1], na.rm = TRUE), loss = sum(area_km2[loss])) })
+```
+
+## Extension 4: microclimatic refugia within areas of projected loss
+
+For the two focal scenarios, cells projected to lose suitability (currently suitable; fewer than
+half of the GCMs suitable in future) were assessed for three types of potential refugium.
+**Topographic:** within each 2.5′ cell, annual mean temperature was downscaled to the 25 nested 30″
+sub-cells with an environmental lapse rate of 6.5 °C km⁻¹ applied to each sub-cell's elevation
+relative to the cell mean (sensitivity: 5.0 °C km⁻¹). The consensus model was then re-evaluated
+with the other predictors held at cell values (ensemble-median future climate). Cells in which at
+least 10% of sub-cells remained suitable were flagged. **Irrigation:** at least 5% of the cell
+equipped for irrigation. **Tree cover:** at least 30% tree cover, indicating forest and riparian
+vegetation that buffers microclimate. These flags identify where persistence is plausible despite
+a regional loss of suitability. They are not modelled predictions of persistence.
+
+```{r}
+#| label: e5-gwl
+#| code-summary: "Show code: Extension 5"
+# Global warming levels (relative to 1850-1900) of each GCM x SSP x period, from Hauser et al. (2022)
+wl_file <- file.path(dat_dir, "warming_levels", "cmip6_warming_levels_all_ens_1850_1900.csv")
+if (!file.exists(wl_file)) {
+  dir.create(dirname(wl_file), showWarnings = FALSE)
+  download.file("https://raw.githubusercontent.com/mathause/cmip_warming_levels/main/warming_levels/cmip6_all_ens/csv/cmip6_warming_levels_all_ens_1850_1900.csv", wl_file, quiet = TRUE)
+}
+wl <- read_csv(wl_file, comment = "#", show_col_types = FALSE) |> rename_with(trimws) |>
+  mutate(across(where(is.character), trimws)) |> filter(warming_level >= 1) |>
+  mutate(ssp = sub("ssp", "", exp), centre = (start_year + end_year) / 2)
+wl_member <- wl |> distinct(model, ensemble) |> group_by(model) |>
+  arrange(ensemble != "r1i1p1f1", ensemble != "r1i1p1f2", .by_group = TRUE) |> slice(1)
+wl1 <- semi_join(wl, wl_member, by = c("model", "ensemble"))
+gwl_of <- function(g, s, yr) {
+  d <- filter(wl1, model == g, ssp == s) |> arrange(centre)
+  if (nrow(d) == 0) return(NA_real_)
+  if (yr >= max(d$centre)) return(max(d$warming_level))           # beyond last crossing: lower bound
+  approx(d$centre, d$warming_level, yr, rule = 2)$y
+}
+scen$gwl <- pmap_dbl(list(scen$gcm, scen$ssp, per_mid[as.character(scen$period)]), gwl_of)
+scen$gwl_capped <- pmap_lgl(list(scen$gcm, scen$ssp, per_mid[as.character(scen$period)]), function(g, s, yr)
+  { d <- filter(wl1, model == g, ssp == s); nrow(d) > 0 && yr >= max(d$centre) })
+# Periods beyond a GCM's last tabulated crossing: estimate GWL from local warming (per-GCM linear fit on uncapped periods)
+clim4 <- readRDS(file.path(base_dir, "outputs_7", "key_results.rds"))$clim_all |> filter(domain == "All land") |>
+  dplyr::select(id, dT_land = d_bio1)
+scen <- scen |> left_join(clim4, by = "id")
+gwl_fit <- scen |> filter(!gwl_capped, !is.na(gwl)) |> group_by(gcm) |>
+  group_modify(~ { m <- lm(gwl ~ dT_land, data = .x); tibble(a = coef(m)[1], b = coef(m)[2], r2 = summary(m)$r.squared, n = nrow(.x)) }) |> ungroup()
+scen <- scen |> left_join(gwl_fit, by = "gcm") |>
+  mutate(gwl = ifelse(gwl_capped | is.na(gwl), pmax(gwl, a + b * dT_land, na.rm = TRUE), gwl)) |> dplyr::select(-a, -b, -r2, -n)
+gwl_tab <- summ4 |> filter(unit == "Australia") |>
+  inner_join(dplyr::select(scen, id, gwl, gwl_capped), by = "id") |>
+  left_join(expo |> filter(group == "Cattle", unit == "Australia") |> dplyr::select(id, cattle_pct = pct_change), by = "id")
+gwl_levels <- c(1.5, 2, 3, 4)
+gwl_sum <- map_dfr(gwl_levels, function(L) gwl_tab |> filter(set == "core", abs(gwl - L) <= 0.25) |>
+  group_by(unit) |> summarise(gwl = L, n = n(), med = median(pct_change), lo = quantile(pct_change, 0.1), hi = quantile(pct_change, 0.9),
+                              known = 100 * median(known_suitable, na.rm = TRUE), cattle = median(cattle_pct, na.rm = TRUE), .groups = "drop"))
+gwl_maps <- map(setNames(gwl_levels[1:3], gwl_levels[1:3]), function(L) {
+  ids <- scen$id[scen$set == "core" & abs(scen$gwl - L) <= 0.25]; rowMeans(B[, ids, drop = FALSE]) })
+gwl_year <- wl1 |> filter(model %in% scen$gcm[scen$set == "core"], warming_level %in% gwl_levels, ssp %in% ssps) |>
+  group_by(ssp, warming_level) |> summarise(n_gcm = n_distinct(model), year_med = median(centre), year_lo = min(centre), year_hi = max(centre), .groups = "drop")
+write_csv(dplyr::select(scen, id, gcm, ssp, period, gwl, gwl_capped), file.path(out_dir, "scenario_global_warming_levels.csv"))
+```
+
+## Extension 5: global warming levels
+
+The global warming level (GWL, relative to 1850–1900) of each GCM × SSP × period was obtained from
+the 20-year windows in which each CMIP6 simulation first reaches 1.0, 1.2, 1.5, 2, 3 and 4 °C
+[@hauser2022]. For each GCM and SSP, the GWL at the centre of each `code_7` period was interpolated
+between the centres of these windows. For periods after a simulation's last tabulated crossing (for
+example, SSP1-2.6 after warming stabilises), interpolation would understate the GWL. For these, the
+GWL was estimated from a per-GCM linear regression of GWL on the projected mean warming over
+Australian land, fitted to the interpolated periods (all R² ≥
+`r fmt(min(gwl_fit$r2[gwl_fit$n >= 5]), 2)`). Projections from all 160 core GCM × SSP × period
+combinations were then pooled and summarised at 1.5, 2, 3 and 4 °C (combinations within ±0.25 °C of
+each level).
+
+```{r}
+#| label: e7-surveillance
+#| code-summary: "Show code: Extension 7"
+# Risk-based allocation of surveillance visits among suitable, unrecorded units
+cand <- units |> filter(!infested, pmax(suit_cur, suit_245_2050) >= 0.25) |>
+  mutate(risk = pmax(risk_cur, risk_245_2050))
+prior_from_risk <- function(r, N0) {                                # pi_j = 1 - exp(-c r_j) with sum(pi) = N0
+  f <- function(c) sum(1 - exp(-c * r)) - N0
+  cc <- uniroot(f, c(1e-8, 1e8))$root; 1 - exp(-cc * r)
+}
+allocate <- function(pi, p, budget, weights = NULL) {
+  n <- integer(length(pi))
+  if (!is.null(weights)) {                                          # fixed-rule allocation proportional to weights
+    n <- floor(budget * weights / sum(weights)); rem <- budget - sum(n)
+    if (rem > 0) n[order(-(budget * weights / sum(weights) - n))[seq_len(rem)]] <- n[order(-(budget * weights / sum(weights) - n))[seq_len(rem)]] + 1L
+    return(n)
+  }
+  gain <- function(k, q) -log(1 - q * (1 - (1 - p)^(k + 1))) + log(1 - q * (1 - (1 - p)^k))   # marginal gain in log P(no miss)
+  g <- gain(n, pi)
+  for (b in seq_len(budget)) { j <- which.max(g); n[j] <- n[j] + 1L; g[j] <- gain(n[j], pi[j]) }
+  n
+}
+p_detect_any <- function(pi, p, n) 1 - prod(1 - pi * (1 - (1 - p)^n))
+budgets <- c(0, 25, 50, 100, 200, 300, 500, 750, 1000)
+surv_grid <- expand_grid(N0 = c(1, 5, 20), p = c(0.2, 0.3, 0.5), strategy = c("Risk-based (optimal)", "Proportional to cattle", "Uniform"))
+surv_curve <- pmap_dfr(surv_grid, function(N0, p, strategy) {
+  pi <- prior_from_risk(cand$risk, N0)
+  map_dfr(budgets, function(bud) {
+    n <- switch(strategy, "Risk-based (optimal)" = allocate(pi, p, bud),
+                "Proportional to cattle" = allocate(pi, p, bud, weights = cand$cattle),
+                "Uniform" = allocate(pi, p, bud, weights = rep(1, nrow(cand))))
+    tibble(N0 = N0, p = p, strategy = strategy, budget = bud, p_any = p_detect_any(pi, p, n),
+           exp_det = sum(pi * (1 - (1 - p)^n)))
+  })
+})
+# Reference design: 250 visits, 5 expected undetected populations, 30% detection per visit
+cand$pi    <- prior_from_risk(cand$risk, 5)
+cand$visits <- allocate(cand$pi, 0.3, 250)
+cand$post  <- cand$pi * 0.7^cand$visits / (cand$pi * 0.7^cand$visits + 1 - cand$pi)    # after negative surveys
+surv_jur <- cand |> group_by(jur) |> summarise(units = n(), visits = sum(visits), prior = sum(pi), posterior = sum(post),
+                                               cattle = sum(cattle), .groups = "drop") |> arrange(desc(visits))
+write_csv(cand, file.path(out_dir, "surveillance_allocation_units.csv"))
+```
+
+## Extension 7: design of surveillance for undetected populations
+
+Candidate surveillance units were 0.25° units that are not infested and are suitable (≥ 25% of the
+unit) now or in 2041–2060. Each unit's prior probability of harbouring an undetected population was
+*π*~*j*~ = 1 − exp(−*c* *R*~*j*~), where *R*~*j*~ is the establishment risk from Extension 2 and *c* is
+chosen so that the expected number of undetected populations Σ*π*~*j*~ equals *N*~0~. *N*~0~ is unknown,
+so we used 1, 5 and 20. A surveillance visit (for example, inspecting a cattle herd or drag sampling
+at a property) detects an existing population with probability *p* (0.2, 0.3 or 0.5). For a budget
+of *B* visits, the allocation {*n*~*j*~} maximising the probability of detecting at least one
+population, 1 − Π~*j*~[1 − *π*~*j*~(1 − (1 − *p*)^*n*~*j*~^)], was found by greedy marginal allocation.
+This is optimal because each unit's contribution is concave in *n*~*j*~. The optimal allocation was
+compared with allocation proportional to cattle numbers and with uniform allocation. For a reference
+design (*B* = 250, *N*~0~ = 5, *p* = 0.3), we report the allocation by unit and jurisdiction and the
+posterior probability of presence if all visits are negative.
+
+All analyses were run in R `r paste(R.version$major, R.version$minor, sep = ".")` with `terra`
+`r packageVersion("terra")`, `sf`, `matrixStats` and the `tidyverse`.
+
+# Results
+
+```{r}
+#| label: results-values
+#| include: false
+mil <- function(x, d = 1) fmt(x / 1e6, d)
+ee  <- function(g, u, s, p) filter(expo_ens, group == g, unit == u, ssp == s, period == p)
+ecur <- function(g, u) filter(expo_ens, group == g, unit == u)$exposed_cur[1]
+cp  <- function(s, p) filter(cost_proj, ssp_l == ssp_lab[s], period == p)
+mgc <- function(sc, u, cl) { x <- filter(mg_cattle, scenario == focal_lab[sc], unit == u, class == cl)$cattle; if (length(x)) x else 0 }
+ps  <- function(k) filter(pm_summary, key == k)
+gs  <- function(u, L) filter(gwl_sum, unit == u, gwl == L)
+rf  <- function(k, u, cl) { x <- filter(ref_tab, scenario == focal_lab[k], unit == u, cls %in% cl)$area; sum(x) }
+```
+
+## Extension 1: livestock, human and economic exposure
+
+Of the `r mil(sum(cattle_c))` million cattle and `r mil(sum(sheep_c))` million sheep on the
+Australian land grid, `r mil(ecur("Cattle", "Australia"))` million cattle and
+`r mil(ecur("Sheep", "Australia"))` million sheep are in climatically suitable areas under current
+climate (@tbl-exposure, @suppfig-livemaps). This is only about
+`r fmt(100 * ecur("Cattle", "Australia") / sum(cattle_c), 0)`% of Australia's cattle, because most are in
+the semi-arid and tropical north. In Australia, exposure falls faster than suitable area, because the
+areas lost (subcoastal Queensland, northern New South Wales, inland Victoria) carry more cattle per
+unit area than the persistent core. Cattle in suitable climate change by
+`r sgn(ee("Cattle", "Australia", "245", "2041-2060")$pct_med)`% by 2041–2060 under SSP2-4.5, and by
+`r sgn(ee("Cattle", "Australia", "245", "2081-2100")$pct_med)`% (SSP2-4.5) to
+`r sgn(ee("Cattle", "Australia", "585", "2081-2100")$pct_med)`% (SSP5-8.5) by 2081–2100; sheep change by
+`r sgn(ee("Sheep", "Australia", "245", "2041-2060")$pct_med)`% and
+`r sgn(ee("Sheep", "Australia", "245", "2081-2100")$pct_med)`% to `r sgn(ee("Sheep", "Australia", "585", "2081-2100")$pct_med)`%,
+respectively (@fig-livestock a). Under SSP2-4.5
+in 2041–2060, `r mil(mgc("245_2041-2060", "Australia", "Persistent (robust)"))` million of Australia's
+exposed cattle are in the persistent core, `r mil(mgc("245_2041-2060", "Australia", "At risk (uncertain)"))`
+million in areas at risk and `r mil(mgc("245_2041-2060", "Australia", "Likely loss"))` million in areas
+likely to become unsuitable. By 2081–2100 under SSP3-7.0, these figures are
+`r mil(mgc("370_2081-2100", "Australia", "Persistent (robust)"))`, `r mil(mgc("370_2081-2100", "Australia", "At risk (uncertain)"))`
+and `r mil(mgc("370_2081-2100", "Australia", "Likely loss"))` million (@fig-livestock b). Scaling the MLA
+estimate of AUD 18.8 million per year (AUD `r fmt(cost_head, 2)` per exposed head), the indicative cost
+of theileriosis to Australian cattle producers falls to AUD `r fmt(cp("245", "2041-2060")$med / 1e6, 1)`
+million by 2041–2060 under SSP2-4.5, and to AUD `r fmt(cp("245", "2081-2100")$med / 1e6, 1)` million
+(SSP2-4.5) to AUD `r fmt(cp("585", "2081-2100")$med / 1e6, 1)` million (SSP5-8.5) by 2081–2100
+(@fig-livestock c). The `r mil(ecur("People", "Australia"))` million Australians living in climatically
+suitable areas (including much of Brisbane, Sydney, Melbourne and Hobart) define the human population
+potentially exposed to *H. longicornis*-borne pathogens. This changes by
+`r sgn(-100 + 100 * ee("People", "Australia", "370", "2081-2100")$med / ecur("People", "Australia"))`% by
+2081–2100 under SSP3-7.0 (population held at 2020 levels).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-livestock
+#| fig-cap: "Livestock exposure (Extension 1). (a) Change in the number of cattle and sheep in climatically suitable areas relative to current climate (lines: median across ten GCMs; ribbons: range). (b) Cattle in currently suitable climate by management category of `code_7` for the two focal scenarios. (c) Indicative annual cost of theileriosis to Australian cattle producers, scaling the 2022 estimate of AUD 18.8 million [@shephard2022] by the number of exposed cattle."
+#| fig-width: 13
+#| fig-height: 4.8
+ex_t <- expo_ens |> filter(group %in% c("Cattle", "Sheep")) |>
+  mutate(year = per_mid[as.character(period)], lab = group) |>
+  bind_rows(expo_ens |> filter(group %in% c("Cattle", "Sheep")) |> distinct(group, unit, ssp_l) |>
+              mutate(year = 1985, pct_med = 0, pct_lo = 0, pct_hi = 0, lab = group))
+p_ex <- ggplot(ex_t, aes(year, pct_med, colour = ssp_l, fill = ssp_l)) + geom_hline(yintercept = 0, colour = "grey60") +
+  geom_ribbon(aes(ymin = pct_lo, ymax = pct_hi), alpha = 0.12, colour = NA) + geom_line(linewidth = 0.8) + geom_point(size = 1.1) +
+  facet_wrap(~ lab, nrow = 1, scales = "free_y") + scale_colour_manual(values = ssp_col, name = NULL) + scale_fill_manual(values = ssp_col, name = NULL) +
+  scale_x_continuous(breaks = c(1985, 2050.5, 2090.5), labels = c("1970–\n2000", "2041–\n2060", "2081–\n2100")) +
+  labs(x = NULL, y = "Change in animals in suitable climate (%)", tag = "a") + theme(legend.position = "bottom")
+mg_lv <- c("Persistent (robust)", "At risk (uncertain)", "Likely loss")
+p_mg <- mg_cattle |> filter(class %in% mg_lv) |> mutate(class = factor(class, levels = rev(mg_lv))) |>
+  ggplot(aes(cattle / 1e6, scenario, fill = class)) + geom_col(width = 0.6) +
+  scale_fill_manual(values = c("Persistent (robust)" = "#1b7837", "At risk (uncertain)" = "#fdb863", "Likely loss" = "#d73027"), name = NULL) +
+  labs(x = "Cattle in currently suitable climate (millions)", y = NULL, tag = "b") + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 2, reverse = TRUE))
+p_ct <- cost_proj |> mutate(year = per_mid[as.character(period)]) |>
+  bind_rows(tibble(ssp_l = factor(ssp_lab, levels = ssp_lab), year = 1985, med = cost_au, lo = cost_au, hi = cost_au)) |>
+  ggplot(aes(year, med / 1e6, colour = ssp_l, fill = ssp_l)) + geom_ribbon(aes(ymin = lo / 1e6, ymax = hi / 1e6), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.8) + geom_point(size = 1.1) + scale_colour_manual(values = ssp_col, guide = "none") + scale_fill_manual(values = ssp_col, guide = "none") +
+  scale_x_continuous(breaks = c(1985, 2050.5, 2090.5), labels = c("Current", "2041–\n2060", "2081–\n2100")) +
+  labs(x = NULL, y = "Indicative annual cost (AUD million)", tag = "c")
+p_ex + p_mg + p_ct + plot_layout(widths = c(2.6, 1.3, 1))
+save_fig("Fig1_livestock_exposure", w = 13, h = 4.8)
+```
+:::
+
+::: {.primary-table}
+```{r}
+#| label: tbl-exposure
+#| tbl-cap: "Cattle, sheep and people in climatically suitable areas (millions; median and range across ten GCMs) and the indicative annual cost of theileriosis to Australian cattle producers (AUD million; scaled from @shephard2022). Livestock: GLW3 (2010); people: GPW v4 (2020), both held constant."
+cell <- function(m, l, h, d = 1) sprintf("%s [%s, %s]", fmt(m, d), fmt(l, d), fmt(h, d))
+sel_sc <- tibble(ssp = c("245", "245", "370", "585"), period = c("2041-2060", "2081-2100", "2081-2100", "2081-2100"))
+cur_row <- expo_ens |> filter(group %in% c("Cattle", "Sheep", "People")) |> distinct(group, unit, exposed_cur) |>
+  transmute(group, unit, Scenario = "Current", v = fmt(exposed_cur / 1e6, 1))
+fut_rows <- expo_ens |> filter(group %in% c("Cattle", "Sheep", "People")) |> semi_join(sel_sc, by = c("ssp", "period")) |>
+  transmute(group, unit, Scenario = paste(ssp_l, gsub("-", "–", period)), v = cell(med / 1e6, lo / 1e6, hi / 1e6))
+cost_rows <- bind_rows(tibble(Scenario = "Current", v = fmt(cost_au / 1e6, 1)),
+  cost_proj |> mutate(ssp = names(ssp_lab)[match(as.character(ssp_l), ssp_lab)]) |> semi_join(sel_sc, by = c("ssp", "period")) |>
+    transmute(Scenario = paste(ssp_l, gsub("-", "–", period)), v = cell(med / 1e6, lo / 1e6, hi / 1e6))) |>
+  mutate(group = "Cost", unit = "Australia")
+bind_rows(cur_row, fut_rows, cost_rows) |>
+  mutate(col = recode(group, Cost = "Theileriosis cost, AUD M", People = "People", Cattle = "Cattle", Sheep = "Sheep")) |>
+  dplyr::select(Scenario, col, v) |> pivot_wider(names_from = col, values_from = v) |>
+  dplyr::select(Scenario, starts_with("Cattle"), starts_with("Sheep"), starts_with("People"), starts_with("Theileriosis")) |>
+  kable(align = "lrrrr")
+```
+:::
+
+## Extension 2: introduction pressure and establishment risk
+
+`r sum(units$infested)` of `r nrow(units)` 0.25° units were classed as infested. Introduction pressure,
+the potential inflow of ticks with cattle from these units, is highest immediately inland of the
+infested coastal belt in New South Wales and Victoria. It is lowest in Western Australia and, because
+of the sea crossing, in Tasmania (@fig-intro). Combined with climatic suitability, establishment risk
+is concentrated in two areas: (i) western Victoria (the Western District and Glenelg region) and the
+adjacent south-east of South Australia; and (ii) isolated suitable units on the New England
+Tablelands and in south-east Queensland adjacent to the infested range. Tasmania
+is climatically suitable throughout but carries only `r fmt(100 * risk_tas_pen01, 1)`% of the total
+establishment risk under the primary sea-crossing penalty, rising to `r fmt(100 * risk_tas_pen05, 1)`%
+if movements across Bass Strait are five times more likely. The ranking was robust to the kernel
+parameters (ρ ≥ `r fmt(min(sens_gamma$rho_pressure), 2)`; ≥ `r fmt(100 * min(sens_gamma$top100_overlap), 0)`% overlap of the
+top-100 units; @supptbl-gravsens).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-intro
+#| fig-cap: "Introduction pressure and establishment risk (Extension 2), 0.25° units. Left: establishment risk, the product of expected introductions (pressure × destination cattle) and current climatic suitability. Right: relative pressure of tick introduction with cattle from the infested range. Grey units are infested (suitable and within 100 km of a known record). Both quantities are scaled to their maximum and shown on a log scale."
+#| fig-width: 13
+#| fig-height: 6.5
+se_base <- list(coord_sf(xlim = c(134, 154), ylim = c(-44, -24), expand = FALSE), labs(x = NULL, y = NULL),
+                theme(panel.background = element_rect(fill = "#f4f8fb", colour = NA), axis.text = element_blank(), panel.grid = element_blank()))
+u_long <- units |> mutate(pressure_rel = pressure / max(pressure)) |>
+  transmute(x, y, infested, `Introduction pressure (relative, log scale)` = ifelse(infested, NA, pressure_rel),
+            `Establishment risk, current climate (relative, log scale)` = ifelse(infested | risk_cur <= 0, NA, risk_cur / max(risk_cur))) |>
+  pivot_longer(-c(x, y, infested), names_to = "panel")
+ggplot() + geom_sf(data = aus_sf, fill = "grey95", colour = NA) +
+  geom_tile(data = filter(u_long, infested), aes(x, y), fill = "grey55", width = 0.25, height = 0.25) +
+  geom_tile(data = filter(u_long, !infested, !is.na(value)), aes(x, y, fill = value), width = 0.25, height = 0.25) +
+  geom_sf(data = jur, fill = NA, colour = "grey35", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "inferno", trans = "log10", limits = c(1e-4, 1), oob = scales::squish, name = "Relative\nvalue") +
+  facet_wrap(~ panel) + se_base
+save_fig("Fig2_introduction_establishment_risk", w = 13, h = 6.5)
+```
+:::
+
+## Extension 3: process-based model
+
+With parameters fixed from laboratory and field studies, the process-based index separated occurrence
+records from available environments in every calibration region (AUC = `r fmt(pm_auc$auc_P[pm_auc$region == "All"])`
+overall; `r fmt(pm_auc$auc_P[pm_auc$region == "Oceania"])` in Oceania and
+`r fmt(pm_auc$auc_P[grepl("^Australia", pm_auc$region)])` for Australian records alone; @supptbl-procval). It classified
+`r fmt(100 * pm_agree[["known_ok"]], 0)`% of grid cells with known Australian records as
+suitable and agreed with the SDM in `r fmt(100 * pm_agree[["binary"]], 0)`% of cells
+(@fig-process a, b). The physiologically suitable area,
+`r fmt(ps("245_2041-2060")$area_P_cur / 1000, 0)` × 10³ km², was similar to that of the SDM. Its limits had
+clear mechanistic causes (@suppfig-proccomp). Dry-stress months exclude the inland, and too few
+larval-questing months and slow development exclude the coldest parts of the Australian Alps and
+the Tasmanian highlands. The main disagreements
+were a narrow band along the inland margin of the SDM range (process model only) and parts of
+Tasmania (SDM only), where cold limits development and the larval questing window. The process index was more sensitive to the larval moisture threshold than to the thermal
+constants (@supptbl-procval). Without the dry-stress term, it overpredicted strongly
+(`r fmt(sens_K$area_P05[is.na(sens_K$D_max)] / 1000, 0)` × 10³ km²).
+
+The two model types disagree about the future. In the process model, physiologically suitable area
+changes by only `r sgn(100 * (ps("245_2041-2060")$area_P / ps("245_2041-2060")$area_P_cur - 1))`% by
+2041–2060 under SSP2-4.5 and `r sgn(100 * (ps("370_2081-2100")$area_P / ps("370_2081-2100")$area_P_cur - 1))`% by
+2081–2100 under SSP3-7.0. Only `r fmt(100 * ps("245_2041-2060")$sdm_loss_also_proc, 0)`–`r fmt(100 * ps("370_2081-2100")$sdm_loss_also_proc, 0)`%
+of the area that the SDM projects to lose is also lost in the process model, mainly along the inland
+margin where dry-stress months increase. In the persistent core, warming lengthens the nymph and adult
+questing season by `r fmt(ps("245_2041-2060")$dMa_core, 1)` months by 2041–2060 under SSP2-4.5 and by
+`r fmt(ps("370_2081-2100")$dMa_core, 1)` months by 2081–2100 under SSP3-7.0. It also increases the
+potential generation rate by `r fmt(ps("245_2041-2060")$dG_core, 2)` and `r fmt(ps("370_2081-2100")$dG_core, 2)`
+generations per year (@fig-process c). The largest increases in season length are in Tasmania and
+the Victorian highlands, where activity is currently limited by cold.
+
+::: {.primary-figure}
+```{r}
+#| label: fig-process
+#| fig-cap: "Process-based model (Extension 3). (a) Life-cycle feasibility index *P* under current climate. (b) Agreement between the process model (*P* ≥ 0.5) and the SDM. (c) Change in the length of the nymph and adult questing season (months) within the persistent core range (≥ 80% of GCMs suitable) for the two focal scenarios (median across ten GCMs)."
+#| fig-width: 13
+#| fig-height: 9.5
+agr_lab <- c("Both suitable", "SDM only", "Process model only", "Neither")
+agr <- ifelse(bin_cur & pm_cur$P >= thr_P, 1L, ifelse(bin_cur, 2L, ifelse(pm_cur$P >= thr_P, 3L, 4L)))
+p_P <- ggplot(map_df(list(a = pm_cur$P), tibble(key = "a"))) + geom_raster(aes(x, y, fill = value)) +
+  geom_sf(data = aus_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "magma", direction = -1, limits = c(0, 1), name = "Process\nindex P") + map_base + labs(tag = "a")
+p_ag <- ggplot(map_df(list(a = agr), tibble(key = "a"), fun = "modal") |> mutate(v = factor(agr_lab[value], levels = agr_lab))) +
+  geom_raster(aes(x, y, fill = v)) + geom_sf(data = aus_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_manual(values = c("Both suitable" = "#1b7837", "SDM only" = "#5aae61", "Process model only" = "#c2a5cf", Neither = "grey90"), name = NULL) +
+  map_base + labs(tag = "b")
+core_k <- function(k) bin_cur & agree(k) >= 0.8
+dM <- map_df(setNames(lapply(c("245_2041-2060", "370_2081-2100"), function(k) ifelse(core_k(k), pm_ens[[k]]$M_a - pm_cur$M_a, NA)),
+                      c("245_2041-2060", "370_2081-2100")), tibble(key = c("245_2041-2060", "370_2081-2100"), panel = focal_lab))
+p_dM <- ggplot(dM) + geom_sf(data = aus_sf, fill = "grey95", colour = NA) + geom_raster(aes(x, y, fill = value)) +
+  geom_sf(data = aus_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_gradient2(low = "#2166ac", high = "#b2182b", name = "Δ questing\nseason\n(months)") + facet_wrap(~ panel) + map_base + labs(tag = "c")
+(p_P + p_ag) / p_dM
+save_fig("Fig3_process_model", w = 13, h = 9.5)
+```
+:::
+
+## Extension 4: microclimatic refugia
+
+Of the `r fmt(ref_lapse$loss[1] / 1000, 0)` × 10³ km² projected to lose suitability by 2041–2060 under
+SSP2-4.5, `r fmt(ref_lapse$lapse6.5[1] / 1000, 1)` × 10³ km² (`r fmt(100 * ref_lapse$lapse6.5[1] / ref_lapse$loss[1], 0)`%)
+retains suitable cooler sub-cells after topographic downscaling. Under SSP3-7.0 in 2081–2100, the
+figures are `r fmt(ref_lapse$lapse6.5[2] / 1000, 1)` of `r fmt(ref_lapse$loss[2] / 1000, 0)` × 10³ km²
+(`r fmt(100 * ref_lapse$lapse6.5[2] / ref_lapse$loss[2], 0)`%; @fig-refugia, @supptbl-refugia). Topographic
+refugia occur mainly in the ranges of south-east Queensland and north-east New South Wales and on the
+Atherton Tableland, where loss cells contain valleys and slopes several hundred metres higher than the cell
+mean. Irrigation is a potential refuge on a further `r fmt(rf("245_2041-2060", "Australia", "Irrigation") / 1000, 1)`
+× 10³ km² (SSP2-4.5 2041–2060), mostly irrigated dairy and mixed farming land in south-west Victoria,
+Gippsland (Macalister district), south-east South Australia and the Tasmanian midlands. Tree cover ≥ 30% applies to much of the forested subcoastal land of New South
+Wales and Queensland. Taking all three types together, `r fmt(100 * (1 - rf("245_2041-2060", "Australia", "No refuge identified") / ref_lapse$loss[1]), 0)`%
+of the area of projected loss under SSP2-4.5 2041–2060 contains at least one potential refuge type,
+whereas `r fmt(rf("245_2041-2060", "Australia", "No refuge identified") / 1000, 1)` × 10³ km² (mostly
+cleared, unirrigated pasture on the inland and western margin) has none.
+
+::: {.primary-figure}
+```{r}
+#| label: fig-refugia
+#| fig-cap: "Potential microclimatic refugia within areas projected to lose climatic suitability (Extension 4). *Topographic*: ≥ 10% of 30″ sub-cells remain suitable after lapse-rate downscaling of temperature; *irrigation*: ≥ 5% of the cell equipped for irrigation; *tree cover*: ≥ 30% tree cover; categories are hierarchical."
+#| fig-width: 13
+#| fig-height: 6
+ref_lv <- c("Topographic + land cover/irrigation", "Topographic", "Irrigation", "Tree cover", "No refuge identified")
+ref_col <- c("Topographic + land cover/irrigation" = "#2d004b", "Topographic" = "#8073ac", Irrigation = "#35978f",
+             "Tree cover" = "#a6dba0", "No refuge identified" = "#d73027")
+d_ref <- map_df(setNames(lapply(focal, function(k) match(refugia_class(k), ref_lv)), focal),
+                tibble(key = focal, panel = focal_lab), fun = "modal") |> mutate(cls = factor(ref_lv[value], levels = ref_lv))
+ggplot(d_ref) + geom_sf(data = aus_sf, fill = "grey95", colour = NA) + geom_raster(aes(x, y, fill = cls)) +
+  geom_sf(data = jur, fill = NA, colour = "grey35", linewidth = 0.1) + scale_fill_manual(values = ref_col, name = NULL, drop = FALSE) +
+  facet_wrap(~ panel) + coord_sf(xlim = c(113, 154), ylim = c(-44, -15), expand = FALSE) + labs(x = NULL, y = NULL) +
+  theme(panel.background = element_rect(fill = "#f4f8fb", colour = NA), axis.text = element_blank(), panel.grid = element_blank(),
+        legend.position = "bottom")
+save_fig("Fig4_refugia", w = 13, h = 6)
+```
+:::
+
+## Extension 5: global warming levels
+
+Expressed against global warming, the projections collapse onto a single, roughly linear relationship
+for Australia, irrespective of emissions scenario or period (@fig-gwl a). Suitable area in Australia
+changes by `r sgn(gs("Australia", 1.5)$med)`% at 1.5 °C, `r sgn(gs("Australia", 2)$med)`% at 2 °C,
+`r sgn(gs("Australia", 3)$med)`% at 3 °C and `r sgn(gs("Australia", 4)$med)`% at 4 °C of global warming
+(@tbl-gwl). Cattle exposure falls faster, changing by `r sgn(gs("Australia", 2)$cattle)`% at 2 °C and
+`r sgn(gs("Australia", 3)$cattle)`% at 3 °C. The share of known localities that remain suitable falls
+from `r fmt(gs("Australia", 1.5)$known, 0)`% at 1.5 °C to
+`r fmt(gs("Australia", 3)$known, 0)`% at 3 °C. The spatial pattern at each warming level is the same
+contraction from the warm and dry margins seen in `code_7` (@fig-gwl b). In the ten core GCMs, the median year of reaching 2 °C is
+`r round(filter(gwl_year, ssp == "245", warming_level == 2)$year_med)` under SSP2-4.5 and
+`r round(filter(gwl_year, ssp == "370", warming_level == 2)$year_med)` under SSP3-7.0, and 3 °C is reached in
+`r filter(gwl_year, ssp == "245", warming_level == 3)$n_gcm` of 10 GCMs under SSP2-4.5 by the end of the century
+(@supptbl-gwlyear).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-gwl
+#| fig-cap: "Projections at global warming levels (Extension 5). (a) Change in climatically suitable area against the global warming level of each GCM × SSP × period (relative to 1850–1900); the line is a LOESS smooth. Open symbols: warming level estimated from local warming because the period lies beyond the last tabulated crossing. (b) Fraction of projections within ±0.25 °C of each warming level that are climatically suitable."
+#| fig-width: 13
+#| fig-height: 8
+p_gs <- gwl_tab |> filter(set == "core") |>
+  ggplot(aes(gwl, pct_change)) + geom_hline(yintercept = 0, colour = "grey60") +
+  geom_point(aes(colour = ssp_l, shape = gwl_capped), alpha = 0.75, size = 1.6) +
+  geom_smooth(method = "loess", span = 0.9, colour = "black", linewidth = 0.8, se = FALSE) +
+  scale_colour_manual(values = ssp_col, name = NULL) + scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 1), labels = c("Interpolated", "Estimated from local warming"), name = NULL) +
+  labs(x = "Global warming level (°C above 1850–1900)", y = "Change in suitable area (%)", tag = "a") +
+  theme(legend.position = "right")
+d_gm <- map_df(setNames(gwl_maps, paste0("g", names(gwl_maps))), tibble(key = paste0("g", names(gwl_maps)), panel = paste0(names(gwl_maps), " °C")))
+p_gm <- ggplot(d_gm) + geom_raster(aes(x, y, fill = value)) +
+  geom_sf(data = aus_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_distiller(palette = "YlGnBu", direction = 1, limits = c(0, 1), name = "Fraction of\nprojections\nsuitable") +
+  facet_wrap(~ panel, nrow = 1) + map_base + labs(tag = "b")
+p_gs / p_gm + plot_layout(heights = c(1, 1.1))
+save_fig("Fig5_global_warming_levels", w = 13, h = 8)
+```
+:::
+
+::: {.primary-table}
+```{r}
+#| label: tbl-gwl
+#| tbl-cap: "Change in climatically suitable area, cattle exposure and known localities remaining suitable at global warming levels (median and 10th–90th percentile across GCM × SSP × period combinations within ±0.25 °C of each level)."
+gwl_sum |>
+  transmute(`Warming level` = paste0(gwl, " °C"), `Projections` = n,
+            `Change in suitable area (%)` = sprintf("%s [%s, %s]", sgn(med), sgn(lo), sgn(hi)),
+            `Change in cattle exposed (%)` = sgn(cattle), `Known localities suitable (%)` = fmt(known, 0)) |>
+  kable(align = "lrrrr")
+```
+:::
+
+## Extension 7: surveillance design
+
+`r nrow(cand)` units were candidates for surveillance. Risk-based allocation was much more efficient than
+the alternatives (@fig-surv a). With five undetected populations and a 30% chance that a visit detects
+an existing population, 100 risk-allocated visits detect at least one population with probability
+`r fmt(filter(surv_curve, N0 == 5, p == 0.3, budget == 100, strategy == "Risk-based (optimal)")$p_any, 2)`, compared
+with `r fmt(filter(surv_curve, N0 == 5, p == 0.3, budget == 100, strategy == "Proportional to cattle")$p_any, 2)` for
+allocation proportional to cattle and `r fmt(filter(surv_curve, N0 == 5, p == 0.3, budget == 100, strategy == "Uniform")$p_any, 2)`
+for uniform allocation. Uniform allocation needs more than five times as many visits to match 100
+risk-based visits. The advantage persists across assumed numbers of undetected populations and detection
+probabilities. In the reference design (250 visits), `r sum(cand$visits > 0)` units receive visits;
+`r surv_jur$visits[surv_jur$jur == "Victoria"]` of the visits go to Victoria,
+`r sum(surv_jur$visits[surv_jur$jur == "New South Wales"])` to New South Wales and
+`r sum(surv_jur$visits[surv_jur$jur == "South Australia"])` to South Australia (@fig-surv b, @tbl-surv,
+@supptbl-survjur). If all visits are negative, the expected number of undetected populations among
+candidate units falls from `r fmt(sum(cand$pi), 1)` to `r fmt(sum(cand$post), 1)`, and the posterior
+probability of presence in each visited unit falls below `r fmt(max(cand$post[cand$visits > 0]), 2)`
+(@suppfig-post). Tasmania receives `r sum(surv_jur$visits[surv_jur$jur == "Tasmania"])` visits under the
+primary gravity model, because modelled introduction pressure across Bass Strait is low. This allocation depends on the sea-crossing
+assumption, and Tasmania's large suitable area makes a modest allocation prudent (see Discussion).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-surv
+#| fig-cap: "Surveillance design (Extension 7). (a) Probability of detecting at least one undetected population against the number of surveillance visits for risk-based (optimal), cattle-proportional and uniform allocation, for several assumed numbers of undetected populations (N0) and per-visit detection probabilities (p). (b) Risk-based allocation of 250 visits (N0 = 5, p = 0.3); pale purple: candidate units; grey: infested units."
+#| fig-width: 13
+#| fig-height: 6
+p_sc <- surv_curve |> filter(p == 0.3 | N0 == 5) |>
+  mutate(panel = sprintf("N0 = %s, p = %s", N0, p)) |>
+  ggplot(aes(budget, p_any, colour = strategy)) + geom_line(linewidth = 0.8) + geom_point(size = 1) +
+  facet_wrap(~ panel, ncol = 3) + scale_colour_manual(values = c("Risk-based (optimal)" = "#762a83", "Proportional to cattle" = "#4393c3", Uniform = "grey50"), name = NULL) +
+  labs(x = "Surveillance visits", y = "P(detect ≥ 1 undetected population)", tag = "a") + theme(legend.position = "bottom")
+p_alloc <- ggplot() + geom_sf(data = aus_sf, fill = "grey95", colour = NA) +
+  geom_tile(data = filter(units, infested), aes(x, y), fill = "grey70", width = 0.25, height = 0.25) +
+  geom_tile(data = cand, aes(x, y), fill = "#e7d4e8", width = 0.25, height = 0.25) +
+  geom_point(data = filter(cand, visits > 0), aes(x, y, size = visits), colour = "#762a83", alpha = 0.8) +
+  geom_sf(data = jur, fill = NA, colour = "grey35", linewidth = 0.1) + scale_size_area(max_size = 5, name = "Visits") +
+  se_base + labs(tag = "b")
+p_sc + p_alloc + plot_layout(widths = c(1.25, 1))
+save_fig("Fig6_surveillance_design", w = 13, h = 6)
+```
+:::
+
+::: {.primary-table}
+```{r}
+#| label: tbl-surv
+#| tbl-cap: "The 15 highest-ranked candidate surveillance units in the reference design (250 visits; N0 = 5; p = 0.3): prior probability of an undetected population, allocated visits and posterior probability if all visits are negative."
+cand |> arrange(desc(visits), desc(pi)) |> head(15) |>
+  transmute(`State or territory` = jur, `Lon` = fmt(x, 2), `Lat` = fmt(y, 2), `Cattle (10³)` = fmt(cattle / 1000, 1),
+            `Distance to known record (km)` = fmt(d_known, 0), `Prior` = fmt(pi, 3), `Visits` = visits, `Posterior` = fmt(post, 3)) |>
+  kable(align = "lrrrrrrr")
+```
+:::
+
+# Discussion
+
+These extensions translate the climatic projections of `code_6` and `code_7` into quantities that
+bear directly on management in Australia: animals and people exposed, likely routes of introduction,
+changes in seasonal activity, places where the tick may persist despite regional losses, outcomes at
+policy-relevant warming levels, and an efficient surveillance design. Five messages stand out.
+
+## Livestock exposure is concentrated in the persistent core
+
+Most of the cattle exposed to *H. longicornis*, and therefore to *Theileria orientalis*, are in the
+persistent core: the dairy and beef districts of coastal New South Wales, Gippsland, south-west
+Victoria and Tasmania. Their exposure is unaffected by climate
+change under any scenario. The projected decline in Australian exposure is real but comes mainly from
+subcoastal Queensland and northern New South Wales, where *T. orientalis* Ikeda already causes disease
+[@kamau2011] and where control will remain necessary for decades. The indicative cost projection should
+be read as a relative index. It assumes a constant cost per exposed animal, whereas in practice costs
+depend on herd immunity: disease is concentrated in naive animals, so cost per exposed head is likely
+to be higher where the tick arrives in new areas and lower where infection is endemic
+[@shephard2022]. The cost estimate also excludes dairy, which in south-eastern Australia probably bears
+a large share of the cost. The most useful next step is to link these exposure
+estimates with herd-level disease data from state and national surveillance.
+
+## Introduction pressure, not climate, will determine new incursions
+
+Climate change opens almost no new climatically suitable area (`code_7`), so new incursions will occur
+in places that are already suitable but not yet infested. The gravity model ranks these by the
+potential flow of cattle from infested districts. The Western District of Victoria and the New
+England Tablelands of New South Wales stand out because they combine suitable climate, large cattle
+populations and proximity to infested areas. These areas also coincide with the surveillance gaps
+identified in `code_6`. The model is deliberately simple. Replacing the distance kernel with observed
+movement networks from NLIS, and adding movements of wildlife hosts, would substantially improve the
+risk estimates.
+
+## The process model confirms where the tick can live but questions how fast it will retreat
+
+The process-based model is built from laboratory thresholds and field tolerances, not from occurrence
+records. That it reproduces the known distribution almost as well as the SDM confirms that the
+correlative model has captured real physiological limits: dry-season desiccation inland, cold in the
+south and at altitude, and an annual life cycle across the core. Its future projections, however,
+show much less contraction than the SDM. The difference lies at the warm margin. The SDM has learned
+from the native and invaded ranges that suitability declines above about 15–20 °C mean annual
+temperature, whereas the process model contains no thermal penalty below the heat-stress threshold,
+and in it warming simply accelerates development. Either the SDM's warm-side decline reflects
+processes absent from the process model (for example warm-season mortality of eggs and unfed larvae
+at high temperature and humidity, disruption of the diapause that synchronises the life cycle,
+competition with other ticks, or host changes), or it partly reflects the limited sampling of hot
+climates in the calibration data. Field monitoring of tick abundance along the northern margin is the
+most direct way to discriminate between these explanations. Until then, the SDM losses at the warm
+margin should be treated as an upper bound. The process model's projections of seasonality are more
+robust: in the core range, the questing season lengthens by one to two and a half months and the
+potential number of generations increases. Both have practical consequences for the timing and
+frequency of acaricide treatment and for the period during which calves are exposed to *T. orientalis*.
+
+## Refugia and warming levels refine the projected losses
+
+Topographic refugia would retain suitable microsites in about one-tenth of the area projected to be
+lost, and irrigation and forest cover could buffer considerably more. These estimates are crude: the
+downscaling adjusts only temperature, and the moisture effects of irrigation and canopy are flagged,
+not modelled. They indicate that losses at the margins will be patchy rather than complete, and that
+irrigated dairy districts in south-west Victoria and Gippsland are where persistence despite regional
+drying is most likely. Expressed at global warming levels, the Australian projections fall on a single curve,
+roughly a 12% loss of suitable area at 1.5 °C, 16% at 2 °C and 24% at 3 °C. This makes them directly
+usable with national climate-risk frameworks, which are increasingly framed by warming level rather
+than by emissions scenario.
+
+## Surveillance
+
+Risk-based allocation is several times more efficient than uniform or herd-proportional allocation,
+because establishment risk is highly concentrated. The absolute detection probabilities depend on two
+unknowns, the number of undetected populations and the sensitivity of a surveillance visit. The
+ranking of units does not, so the allocation map in @fig-surv is useful even though those parameters
+are uncertain. Two adjustments are advisable before using it operationally. First, Tasmania should
+receive some surveillance despite its low modelled introduction pressure, because the penalty for sea
+crossings is an assumption and the island is suitable throughout. Second, the per-visit detection
+probability should be estimated from existing tick survey data. The people living in suitable climate
+in Australia are the population that would be exposed if *H. longicornis*-borne human pathogens, such
+as the bandaviruses causing severe fever with thrombocytopenia syndrome in East Asia [@yu2011], were
+introduced.
+
+## Limitations
+
+Livestock and population layers are fixed at 2010 and 2020, respectively. GLW3 places about
+`r fmt(100 * (1 - sum(cattle_c) / glw_tot[["cattle"]]), 0)`% of Australian cattle outside
+the land grid of the SDM (coastal cells), so exposure is slightly underestimated. The gravity model
+uses distance as a proxy for movement. The process model uses monthly climatologies and a simplified
+life-cycle structure without diapause or host-finding, and two of its structural choices were made
+after inspecting results (see Methods, Extension 3). The surveillance model treats units as independent and assumes
+perfect specificity. For all extensions, the uncertainties described in `code_6` and `code_7` (SDM, GCM
+and scenario) apply in addition.
+
+## Conclusions
+
+The tick's future in Australia will be decided less by climate change, which removes
+suitable climate at the margins but adds almost none, than by the movement of cattle into suitable
+areas that are not yet infested, and by changes in seasonal activity within the persistent core. For
+managers, the priorities that follow are: (i) maintain theileriosis control across the persistent core
+under all scenarios; (ii) target surveillance at the Western District of Victoria, the New England
+Tablelands and, as a precaution, Tasmania; (iii) monitor tick abundance along the northern margin
+to determine how quickly suitability is declining there; and (iv) adjust treatment timing to the
+lengthening questing season.
+
+# Supplementary material {.appendix}
+
+## Supplementary tables
+
+::: {.supp-table}
+::: {#supptbl-procpar}
+```{r}
+stage |> transmute(Stage = stage, `Lower threshold (°C)` = T0, `Duration at 25 °C (d)` = days25, `Thermal constant (degree-days)` = round(K)) |>
+  bind_rows(tibble(Stage = "Total", `Thermal constant (degree-days)` = round(sum(stage$K)))) |> kable()
+```
+Parameters of the process-based model. Thresholds: @yano1987. Durations: @heath2016 as summarised by @schappach2020; the pre-oviposition plus oviposition duration is assumed. Moisture: larval questing requires a saturation deficit ≤ 10 mmHg and nymph/adult questing ≤ 20 mmHg [@heath2016]; heat stress: mean daily maximum ≥ 35 °C.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-procval}
+```{r}
+pm_auc |> transmute(Region = recode(region, East_Asia = "East Asia", North_America = "North America"), `Records` = n,
+                    `AUC, index P` = fmt(auc_P), `AUC, generation rate G only` = fmt(auc_G)) |> kable()
+sens_K |> transmute(`Saturation deficit at` = sd_at, `Thermal constants ×` = K_mult, `Larval SD limit (mmHg)` = sd_larva,
+                    `Questing months required` = M_min, `Dry-stress SD limit (mmHg)` = sd_adult,
+                    `Dry months for zero survival` = ifelse(is.na(D_max), "no dry term", as.character(D_max)), AUC = fmt(auc), `Area P ≥ 0.5 (10³ km²)` = fmt(area_P05 / 1000, 0),
+                    `Agreement with SDM` = fmt(agree_sdm), `Known localities P ≥ 0.5` = fmt(known_ok)) |> kable()
+```
+Evaluation of the process-based model. Top: discrimination of occurrence records from the `code_3`/`code_6` evaluation background in each calibration region and for Australian records alone. Bottom: sensitivity to the formulation and parameters (primary specification: maximum, ×1, 10 mmHg, 4 months, 20 mmHg, 3 months).
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-gravsens}
+```{r}
+sens_gamma |> transmute(`γ` = gamma, `d0 (km)` = d0, `Sea-crossing penalty` = ifelse(is.na(sea_penalty), 0.1, sea_penalty),
+                        `Spearman ρ with primary pressure` = fmt(rho_pressure, 3), `Overlap of top-100 risk units` = fmt(top100_overlap)) |> kable()
+```
+Sensitivity of introduction pressure and establishment risk to the gravity-model parameters (primary: γ = 2, d0 = 50 km, sea-crossing penalty 0.1). With a sea-crossing penalty of 0.5 instead of 0.1, Tasmania's share of total establishment risk rises from `r fmt(100 * risk_tas_pen01, 1)`% to `r fmt(100 * risk_tas_pen05, 1)`%.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-survjur}
+```{r}
+surv_jur |> transmute(`State or territory` = jur, `Candidate units` = units, `Visits allocated` = visits,
+                      `Expected undetected populations (prior)` = fmt(prior, 2), `Expected after negative surveys` = fmt(posterior, 2),
+                      `Cattle in candidate units (10³)` = fmt(cattle / 1000, 0)) |> kable()
+```
+Reference surveillance design (250 visits; N0 = 5; p = 0.3) by jurisdiction.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-refugia}
+```{r}
+ref_tab |> transmute(Scenario = scenario, Category = factor(cls, levels = ref_lv), `Area (10³ km²)` = fmt(area / 1000, 1),
+                     `Cattle (10³)` = fmt(cattle / 1000, 0)) |> arrange(Scenario, Category) |> kable()
+ref_lapse |> transmute(Scenario = scenario, `Area of projected loss (10³ km²)` = fmt(loss / 1000, 1),
+                       `With topographic refugia, 6.5 °C/km (10³ km²)` = fmt(lapse6.5 / 1000, 1),
+                       `With topographic refugia, 5.0 °C/km (10³ km²)` = fmt(lapse5.0 / 1000, 1)) |> kable()
+```
+Potential refugia within areas of projected loss, by category (top) and sensitivity of topographic refugia to the lapse rate (bottom).
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-gwlyear}
+```{r}
+gwl_year |> transmute(Scenario = ssp_lab[ssp], `Warming level (°C)` = warming_level, `GCMs reaching it` = n_gcm,
+                      `Median year (centre of 20-yr window)` = round(year_med), `Range` = sprintf("%d–%d", round(year_lo), round(year_hi))) |> kable()
+```
+Timing of global warming levels in the ten core GCMs [@hauser2022].
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-catjur}
+```{r}
+cj <- as_tibble(cat_jur$fut) |> mutate(id = scen$id) |> pivot_longer(-id, names_to = "jur", values_to = "cattle") |>
+  left_join(dplyr::select(scen, id, ssp, period, set), by = "id") |> filter(set == "core") |>
+  semi_join(sel_sc, by = c("ssp", "period")) |> group_by(jur, ssp, period) |> summarise(med = median(cattle), .groups = "drop") |>
+  mutate(col = paste(ssp_lab[ssp], gsub("-", "–", period))) |> dplyr::select(-ssp, -period) |>
+  pivot_wider(names_from = col, values_from = med)
+tibble(jur = names(cat_jur$cur), Current = as.numeric(cat_jur$cur)) |> left_join(cj, by = "jur") |>
+  filter(Current > 1000) |> arrange(desc(Current)) |> mutate(across(-jur, ~ fmt(.x / 1000, 0))) |> rename(`State or territory` = jur) |> kable()
+```
+Cattle (thousands) in climatically suitable areas by jurisdiction: current and median across GCMs for three scenarios.
+:::
+:::
+
+## Supplementary figures
+
+::: {.supp-figure}
+::: {#suppfig-livemaps}
+```{r}
+#| fig-width: 13
+#| fig-height: 6
+dens <- bind_rows(map_df(list(c = cattle_c / area_km2), tibble(key = "c", sp = "Cattle")), map_df(list(s = sheep_c / area_km2), tibble(key = "s", sp = "Sheep")))
+cur_outline <- as.polygons(aggregate(to_rast(ifelse(bin_cur, 1, NA)), 2, max, na.rm = TRUE)) |> st_as_sf()
+ggplot(dens) + geom_raster(aes(x, y, fill = pmax(value, 0.01))) +
+  geom_sf(data = cur_outline, fill = NA, colour = "black", linewidth = 0.15) +
+  scale_fill_viridis_c(option = "cividis", trans = "log10", name = "Heads km⁻²") + facet_wrap(~ sp) + map_base
+save_fig("FigS1_livestock_density", w = 13, h = 6)
+```
+Cattle and sheep densities (GLW3, 2010; heads km⁻², log scale) with the currently suitable range outlined.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-proccomp}
+```{r}
+#| fig-width: 13
+#| fig-height: 5
+comp <- bind_rows(map_df(list(g = pmin(pm_cur$G, 3)), tibble(key = "g", v = "Generations per year (G, capped at 3)")),
+                  map_df(list(m = pm_cur$M_l), tibble(key = "m", v = "Months suitable for larval questing")),
+                  map_df(list(h = pm_cur$H), tibble(key = "h", v = "Heat-stress months (mean Tmax ≥ 35 °C)")),
+                  map_df(list(d = pm_cur$D), tibble(key = "d", v = "Dry-stress months (SD > 20 mmHg)")))
+plots <- lapply(unique(comp$v), function(vv) ggplot(filter(comp, v == vv)) + geom_raster(aes(x, y, fill = value)) +
+  geom_sf(data = aus_sf, fill = NA, colour = "grey40", linewidth = 0.1) + scale_fill_viridis_c(name = NULL) + map_base + labs(title = vv) +
+  theme(plot.title = element_text(size = 10), legend.position = "bottom"))
+wrap_plots(plots, nrow = 1)
+save_fig("FigS2_process_components", w = 15, h = 5)
+```
+Components of the process-based model under current climate: generations per year (*G*), months suitable for larval questing, heat-stress months and dry-stress months.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-gwlmap}
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+scen |> filter(set == "core") |> ggplot(aes(per_mid[as.character(period)], gwl, colour = ssp_l, shape = gwl_capped)) +
+  geom_jitter(width = 1.5, height = 0, size = 1.8, alpha = 0.8) + scale_colour_manual(values = ssp_col, name = NULL) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 1), labels = c("Interpolated", "Estimated from local warming"), name = NULL) +
+  scale_x_continuous(breaks = per_mid, labels = gsub("-", "–", periods)) + labs(x = NULL, y = "Global warming level (°C above 1850–1900)")
+save_fig("FigS3_gwl_mapping", w = 10, h = 5)
+```
+Global warming level assigned to each GCM × SSP × period. Open symbols: estimated from local warming.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-post}
+```{r}
+#| fig-width: 11
+#| fig-height: 6
+cand |> transmute(x, y, Prior = pi, `Posterior after negative surveys` = post) |> pivot_longer(-c(x, y)) |>
+  ggplot() + geom_sf(data = aus_sf, fill = "grey95", colour = NA) + geom_tile(aes(x, y, fill = value), width = 0.25, height = 0.25) +
+  geom_sf(data = jur, fill = NA, colour = "grey35", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "plasma", trans = "sqrt", name = "Probability") + facet_wrap(~ name) + se_base
+save_fig("FigS4_surveillance_posterior", w = 11, h = 6)
+```
+Prior and posterior (after negative surveys under the reference design) probability that a candidate unit harbours an undetected population.
+:::
+:::
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+# Computational environment {.unnumbered .appendix}
+
+```{r}
+#| label: session-info
+key_results <- list(expo_ens = expo_ens, cost_proj = cost_proj, cost_head = cost_head, units = units, sens_gamma = sens_gamma,
+                    surv_curve = surv_curve, surv_jur = surv_jur, pm_auc = pm_auc, pm_agree = pm_agree, sens_K = sens_K,
+                    pm_summary = pm_summary, ref_tab = ref_tab, ref_lapse = ref_lapse, gwl_sum = gwl_sum, gwl_year = gwl_year)
+saveRDS(key_results, file.path(out_dir, "key_results.rds"))
+sessionInfo()
+```

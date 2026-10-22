@@ -1,0 +1,12 @@
+.primary-figure, .primary-table { border-left: 6px solid #1b7837; background: #f2f9f3; padding: .7em 1em .4em 1em; margin: 1.4em 0; border-radius: 4px; }
+.primary-figure::before { content: "PRIMARY FIGURE \2014 proposed for the main text"; }
+.primary-table::before  { content: "PRIMARY TABLE \2014 proposed for the main text"; }
+.supp-figure, .supp-table { border-left: 6px solid #9a9a9a; background: #f6f6f6; padding: .7em 1em .4em 1em; margin: 1.4em 0; border-radius: 4px; }
+.supp-figure::before { content: "SUPPLEMENTARY FIGURE"; }
+.supp-table::before  { content: "SUPPLEMENTARY TABLE"; }
+.primary-figure::before, .primary-table::before, .supp-figure::before, .supp-table::before {
+  display: block; font-size: .75em; font-weight: 700; letter-spacing: .06em; margin-bottom: .5em; }
+.primary-figure::before, .primary-table::before { color: #1b7837; }
+.supp-figure::before, .supp-table::before { color: #666; }
+.abstract-box { background: #f5f8fc; border: 1px solid #d6e2f0; padding: 1em 1.3em; border-radius: 4px; }
+figcaption, .figure-caption { font-size: .92em; }

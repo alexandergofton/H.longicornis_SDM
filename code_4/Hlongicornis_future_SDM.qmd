@@ -1,0 +1,1775 @@
+---
+title: "Climate change and the future distribution of the Asian longhorned tick, *Haemaphysalis longicornis*, in Australia and New Zealand"
+subtitle: "Projections of a transfer-validated consensus species distribution model under CMIP6 scenarios, with a critical re-evaluation of earlier projections"
+author:
+  - name: "Alexander W. Gofton"
+    affiliation: "CSIRO"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-dpi: 150
+    css: manuscript.css
+    df-print: kable
+execute:
+  warning: false
+  message: false
+  cache: false
+bibliography: references.bib
+link-citations: true
+crossref:
+  custom:
+    - kind: float
+      key: suppfig
+      reference-prefix: "Figure S"
+      caption-prefix: "Figure S"
+      space-before-numbering: false
+    - kind: float
+      key: supptbl
+      reference-prefix: "Table S"
+      caption-prefix: "Table S"
+      space-before-numbering: false
+---
+
+::: {.callout-note collapse="true"}
+## Guide to figures and tables
+
+Figures and tables proposed for the **main text** of a publication are boxed in
+<span style="color:#1b7837;font-weight:700">green</span> and numbered Figure 1, 2, ... / Table 1, 2, ....
+**Supplementary** figures and tables are boxed in <span style="color:#666;font-weight:700">grey</span>,
+numbered Figure S1, S2, ... / Table S1, S2, ..., and collected in the Supplementary Material section.
+All code is embedded; click **Show code** to expand any chunk, or use the **Code** menu (top right) to
+show all code at once. This document builds on the current-climate model in `code_3/`; the previous
+future-climate analysis that it re-evaluates is in `code_2/` (Steps 8–10).
+
+| Main text | Supplementary |
+|---|---|
+| @fig-climate Projected climate change across the current range | @suppfig-validation Derived predictors: validation and the v2 artefact |
+| @fig-future-suit Ensemble-median future suitability | @suppfig-climmaps Maps of projected climate change |
+| @fig-change Range change and GCM agreement | @suppfig-otherperiods Suitability in 2021–2040 and 2061–2080 |
+| @fig-trajectory Trajectories of suitable area and known localities | @suppfig-pergcm Per-GCM projections, SSP2-4.5 2041–2060 |
+| @fig-drivers Climatic drivers of change | @suppfig-novelty Extrapolation and clamping |
+| @fig-uncert Sources of projection uncertainty | @suppfig-drivervars Single-variable effects on suitability |
+| @fig-surv Management categories for surveillance | @suppfig-sens Sensitivity to GCM ensemble and threshold |
+| @tbl-gcm GCM ensemble | @suppfig-shift Latitudinal and elevational shifts |
+| @tbl-change Projected change in suitable area | @suppfig-sdmgcm GCM vs SDM uncertainty, SSP2-4.5 2041–2060 |
+| @tbl-jur Projected suitable area by jurisdiction | @supptbl-v2, @supptbl-pergcm, @supptbl-extrap, @supptbl-vp, @supptbl-drivers, @supptbl-sens, @supptbl-mgmt |
+:::
+
+# Abstract {.unnumbered}
+
+::: {.abstract-box}
+**Aim.** The Asian longhorned tick, *Haemaphysalis longicornis*, is an invasive vector of
+*Theileria orientalis* and other pathogens in Australia and New Zealand. We projected how climate
+change will alter its climatic suitability in both countries. We also re-evaluated an earlier
+projection analysis and corrected its errors.
+
+**Location.** Australia and New Zealand.
+
+**Methods.** A MaxEnt consensus model, calibrated across the native and invaded ranges and validated
+by leave-one-region-out transfer, was projected to four Shared Socioeconomic Pathways (SSP1-2.6 to
+SSP5-8.5) and four periods to 2100, using ten CMIP6 GCMs screened for climate sensitivity and
+independence. Future bioclimatic and aridity predictors were derived from each GCM's monthly climate
+with the same formulations as the training data. We quantified gains, losses and persistence of
+suitable climate; extrapolation (MESS, ExDet) and clamping; the contributions of temperature and
+moisture to change; and the partitioning of uncertainty among emissions scenario, GCM and SDM
+(30 bootstrap replicates).
+
+**Results.** The earlier analysis projected a model that failed to transfer between continents. Its
+future aridity index exceeded its theoretical maximum across 10–65% of the land area, which explains
+most of the reported extrapolation. In the corrected projections, suitable area in Australia declines
+by 12% by 2021–2040 and by 20%, 24%, 34% and 45% by 2081–2100 under SSP1-2.6, SSP2-4.5, SSP3-7.0 and
+SSP5-8.5, respectively. Losses occur at the warm and dry margins in Queensland, New South Wales,
+Victoria, South Australia and Western Australia. New Zealand and Tasmania remain almost entirely
+suitable, and gains are negligible. Warming is the main driver, followed by increased evaporative
+demand. Projected losses lie within analogue climates. The GCM dominates uncertainty until
+mid-century and the emissions scenario thereafter. The share of known localities that remain
+suitable falls from 89% to 66–80% by 2081–2100.
+
+**Main conclusions.** Climate change will contract the Australian range of *H. longicornis* towards
+a persistent core in south-eastern Australia, Tasmania and New Zealand, where the tick and its
+pathogens will remain long-term problems for livestock. Part of this contraction has probably
+already occurred. Physically consistent future predictors and sensitivity-screened GCM ensembles are
+essential for credible projections.
+:::
+
+**Keywords:** *Haemaphysalis longicornis*; Asian longhorned tick; climate change; CMIP6; species distribution model; MaxEnt; extrapolation; uncertainty partitioning; biosecurity; Australia; New Zealand
+
+```{r}
+#| label: setup
+#| cache: false
+#| code-summary: "Show code: packages, paths and helpers"
+options(java.parameters = "-Xmx8g")   # must be set before rJava starts
+suppressPackageStartupMessages({
+  library(dismo)          # MaxEnt (maxent.jar) interface for refitting bootstrap replicates
+  library(terra)
+  library(sf)
+  library(predicts)       # bioclimatic variables from monthly climate
+  library(envirem)        # extraterrestrial radiation for Hargreaves PET
+  library(rnaturalearth)
+  library(tidyterra)
+  library(patchwork)
+  library(parallel)
+  library(knitr)
+  library(tidyverse)      # loaded last so dplyr verbs take precedence
+})
+sf_use_s2(FALSE)
+
+base_dir <- normalizePath("..")                      # project root (this file lives in code_4/)
+proc_v2  <- file.path(base_dir, "processed_data_2")  # upstream inputs (occurrences, global predictors)
+proc_v3  <- file.path(base_dir, "processed_data_3")  # current-climate consensus model (code_3)
+proc_v4  <- file.path(base_dir, "processed_data_4")  # outputs of this analysis
+out_dir  <- file.path(base_dir, "outputs_4")
+fig_dir  <- file.path(base_dir, "figures_4")
+fut_dir  <- file.path(base_dir, "data", "future_climate_cmip6")
+cache_dir <- file.path(proc_v4, "cache")   # results of the slow steps; delete this folder to recompute everything
+for (d in c(proc_v4, out_dir, fig_dir, fut_dir, cache_dir)) dir.create(d, showWarnings = FALSE)
+# Evaluate `expr` once and store the listed objects; later renders reload them
+cached <- function(name, expr, objects) {
+  f <- file.path(cache_dir, paste0(name, ".rds"))
+  if (file.exists(f)) { list2env(readRDS(f), envir = globalenv()); return(invisible(TRUE)) }
+  eval(substitute(expr), envir = globalenv())
+  saveRDS(mget(objects, envir = globalenv()), f)
+}
+terraOptions(memfrac = 0.6, tempdir = file.path(base_dir, "temp"), progress = 0)
+n_cores <- min(6, detectCores() - 1)
+
+theme_set(theme_minimal(base_size = 11) + theme(panel.grid.minor = element_blank()))
+regs    <- c("East_Asia", "North_America", "Oceania")
+var_lab <- c(bio1 = "Annual mean temperature", bio2 = "Mean diurnal range", bio12 = "Annual precipitation",
+             bio13 = "Precip. wettest month", bio15 = "Precipitation seasonality",
+             bio17 = "Precip. driest quarter", aridity_idx = "Thornthwaite aridity index")
+ssps     <- c("126", "245", "370", "585")
+ssp_lab  <- c("126" = "SSP1-2.6", "245" = "SSP2-4.5", "370" = "SSP3-7.0", "585" = "SSP5-8.5")
+ssp_col  <- c("SSP1-2.6" = "#173C66", "SSP2-4.5" = "#F79420", "SSP3-7.0" = "#E71D25", "SSP5-8.5" = "#951B1E")  # IPCC AR6
+periods  <- c("2021-2040", "2041-2060", "2061-2080", "2081-2100")
+per_mid  <- setNames(c(2030, 2050, 2070, 2090), periods)
+focal    <- c("245_2041-2060", "370_2081-2100")   # focal scenarios for maps and attribution
+save_fig <- function(name, p = last_plot(), w = 8, h = 6)
+  ggsave(file.path(fig_dir, paste0(name, ".png")), p, width = w, height = h, dpi = 300, bg = "white")
+fmt <- function(x, d = 2) formatC(x, format = "f", digits = d)
+fmt_int <- function(x) format(round(x), big.mark = ",")
+fmt_rng <- function(med, lo, hi, d = 0) sprintf("%s [%s, %s]", fmt(med, d), fmt(lo, d), fmt(hi, d))
+```
+
+# Introduction
+
+The Asian longhorned tick, *Haemaphysalis longicornis* Neumann, is a three-host ixodid tick native to
+temperate East Asia that has been established in eastern Australia and New Zealand for more than a
+century [@hoogstraal1968; @heath2016]. It is the principal vector of *Theileria orientalis* Ikeda,
+the cause of oriental theileriosis outbreaks in Australian and New Zealand cattle [@kamau2011], and
+in East Asia it transmits severe fever with thrombocytopenia syndrome virus and many other pathogens
+[@yu2011; @zhao2020]. Like other ixodid ticks, it spends most of its life off the host, so its
+distribution is closely tied to climate: temperature governs development, questing and overwinter
+survival, and the atmospheric moisture balance governs the survival of non-feeding stages
+[@needham1991; @ogden2016]. In a companion analysis we showed that a MaxEnt consensus model calibrated
+across the native and invaded ranges, and selected explicitly for its ability to transfer between
+regions, reproduces the Australian and New Zealand distribution of the tick without using any
+Oceanian records (`code_3`). Current climatic suitability is concentrated on the humid, thermally
+equable eastern seaboard of Australia, Tasmania and most of New Zealand, and is bounded inland by
+aridity and continental temperature regimes and to the north by heat.
+
+Both countries are warming, and southern Australia is projected to become drier, particularly in the
+cool season [@grose2020]. Because the current distribution of *H. longicornis* is limited by heat in
+the north, aridity inland and cold in the south and at altitude, climate change could plausibly
+contract its range at its warm and dry margins and expand it at its cool margins. Where these changes
+occur, and how confidently they can be projected, matters for livestock industries and for
+surveillance and control programmes in both countries.
+
+Projecting a species distribution model (SDM) into future climates adds problems to those of
+calibrating it. First, every predictor must be derivable from climate-model output in a way that is
+consistent with the data used to train the model; derived indices that are approximated by ad hoc
+scaling can move outside the range of physically possible values. Second, the choice of global
+climate models (GCMs) is not neutral: several CMIP6 models have equilibrium climate sensitivities
+(ECS) above the range assessed as very likely by the IPCC, and ensembles that include many of these
+"hot" models overstate warming for a given emissions pathway [@forster2021; @hausfather2022]. Third,
+future climates may be outside the range of conditions used to calibrate the model, either for single
+variables or for combinations of variables, where correlative predictions are unreliable
+[@elith2010; @owens2013; @mesgaran2014]. Fourth, projections carry uncertainty from the emissions
+scenario, the GCM and the SDM itself, and the SDM component is often the largest yet the least often
+reported [@buisson2010; @thuiller2019]. Finally, area estimates depend on the suitability threshold
+and on correct accounting for latitude-dependent cell areas.
+
+An earlier iteration of this project (`code_2`, Steps 8–10) projected the previous ("v2") model to
+two emissions scenarios, two periods and five GCMs, and reported contractions of 19–45% in suitable
+area. Here we re-examine that analysis critically and repeat it on the improved model. Our aims were
+to: (i) identify and correct methodological problems in the previous projections and quantify their
+effects; (ii) project the transfer-validated consensus model to four Shared Socioeconomic Pathways
+(SSPs), four 20-year periods to 2100 and an ensemble of ten GCMs screened for climate sensitivity;
+(iii) quantify gains, losses and persistence of suitable climate by jurisdiction, and the fate of
+the localities where the tick is currently known; (iv) attribute projected changes to temperature
+and moisture; (v) assess extrapolation and partition projection uncertainty among emissions
+scenario, GCM and SDM; and (vi) translate the projections into categories relevant to surveillance
+and management.
+
+
+# Methods
+
+## Evaluation of the previous future-climate analysis
+
+We reviewed the code and outputs of the previous projection workflow (`code_2/08_future_climate_data_v2.qmd`,
+`09_future_projections_v2.qmd`, `10_visualization_results_v2.qmd`), re-ran its key calculations where
+the intermediate files were available, and compared them with the corrected analysis described below.
+The problems found fall into five groups (@supptbl-v2): (1) the model being projected; (2) how future
+values of derived predictors were calculated; (3) the composition of the GCM ensemble and the
+scenario design; (4) how suitable area and extrapolation were computed and reported; and (5) the
+absence of any attribution or uncertainty partitioning. The effect of each correctable problem is
+quantified in the Results.
+
+```{r}
+#| label: baseline-model
+#| code-summary: "Show code: baseline consensus model and lambda-based prediction"
+occ <- read_csv(file.path(proc_v2, "occurrences_with_climate.csv"), show_col_types = FALSE) |>
+  mutate(region = if_else(region == "Other", "East_Asia", region))
+env_all <- rast(file.path(proc_v2, "env_all_global.tif"))
+# Training background of code_3; predictor values re-extracted at full precision from the source grid
+bg_train <- read_csv(file.path(proc_v3, "background_train.csv"), show_col_types = FALSE) |> dplyr::select(lon, lat, region)
+bg_train <- bind_cols(bg_train, terra::extract(env_all, as.matrix(bg_train[, c("lon", "lat")])))
+fm <- readRDS(file.path(proc_v3, "final_consensus_models.rds"))
+members <- fm$members; m_final <- fm$models
+kr3 <- readRDS(file.path(base_dir, "outputs_3", "key_results.rds"))
+sel_vars <- kr3$sel_vars
+temp_vars  <- c("bio1", "bio2")
+moist_vars <- setdiff(sel_vars, temp_vars)
+
+# Vectorised MaxEnt cloglog prediction from the fitted lambdas (identical to maxent.jar; verified below)
+parse_lambdas <- function(m) {
+  lam  <- m@lambdas
+  meta <- lam[grepl("^(linearPredictorNormalizer|densityNormalizer|numBackgroundPoints|entropy)", lam)]
+  mv   <- setNames(as.numeric(sub(".*, ", "", meta)), sub(",.*", "", meta))
+  f    <- do.call(rbind, strsplit(lam[!lam %in% meta], ", "))
+  f    <- data.frame(feature = f[, 1], lambda = as.numeric(f[, 2]), min = as.numeric(f[, 3]), max = as.numeric(f[, 4]))
+  list(f = f[f$lambda != 0, ], lpn = mv[["linearPredictorNormalizer"]], dn = mv[["densityNormalizer"]],
+       H = mv[["entropy"]])
+}
+mx_cloglog <- function(L, x, clamp = TRUE) {
+  s <- numeric(nrow(x))
+  for (j in seq_len(nrow(L$f))) {
+    ft <- L$f$feature[j]; lo <- L$f$min[j]; hi <- L$f$max[j]
+    val <- if (startsWith(ft, "'")) { v <- x[[substring(ft, 2)]]; ifelse(v <= lo, 0, (v - lo) / (hi - lo)) }   # hinge
+      else if (startsWith(ft, "`")) { v <- x[[substring(ft, 2)]]; ifelse(v >= hi, 0, (hi - v) / (hi - lo)) }  # reverse hinge
+      else if (grepl("\\^2$", ft)) (x[[sub("\\^2$", "", ft)]]^2 - lo) / (hi - lo)                           # quadratic
+      else if (grepl("\\*", ft)) { p <- strsplit(ft, "\\*")[[1]]; (x[[p[1]]] * x[[p[2]]] - lo) / (hi - lo) } # product
+      else (x[[ft]] - lo) / (hi - lo)                                                                       # linear
+    if (clamp) val <- pmin(pmax(val, 0), 1)
+    s <- s + L$f$lambda[j] * val
+  }
+  1 - exp(-exp(L$H) * exp(s - L$lpn) / L$dn)
+}
+ens_pred <- function(Ls, x, clamp = TRUE) rowMeans(sapply(Ls, mx_cloglog, x = x, clamp = clamp))
+L_final <- lapply(m_final, parse_lambdas)
+
+p_occ   <- ens_pred(L_final, occ)
+thr_p10 <- unname(quantile(p_occ, 0.10))          # identical to code_3 threshold
+thr_mss <- kr3$thr_mss
+p_java  <- rowMeans(sapply(names(m_final), function(nm)
+  as.numeric(dismo::predict(m_final[[nm]], as.data.frame(occ[, members[[nm]]$vars]), args = "outputformat=cloglog"))))
+pred_check <- max(abs(p_occ - p_java))
+```
+
+```{r}
+#| label: bootstrap
+#| code-summary: "Show code: regenerate the 30 bootstrap replicates of the consensus"
+fc_args <- function(fc) {
+  f <- strsplit(fc, "")[[1]]
+  c(paste0("linear=", "L" %in% f), paste0("quadratic=", "Q" %in% f), paste0("hinge=", "H" %in% f),
+    paste0("product=", "P" %in% f), "threshold=false", "autofeature=false")
+}
+fit_mx <- function(p, a, vars, fc, rm) {
+  x <- rbind(as.data.frame(p[, vars]), as.data.frame(a[, vars]))
+  dismo::maxent(x = x, p = c(rep(1, nrow(p)), rep(0, nrow(a))),
+                args = c(fc_args(fc), paste0("betamultiplier=", rm), "doclamp=true"))
+}
+cached("bootstrap", {
+  refit_check <- all(map_lgl(names(members), function(nm) {
+    cf <- members[[nm]]; identical(fit_mx(occ, bg_train, cf$vars, cf$fc, cf$rm)@lambdas, m_final[[nm]]@lambdas) }))
+  n_boot <- 30
+  set.seed(31)                                         # same resampling scheme and seed as code_3
+  boot_L <- map(seq_len(n_boot), function(b) {
+    idx <- unlist(lapply(regs, function(r) { i <- which(occ$region == r); i[sample.int(length(i), replace = TRUE)] }))
+    lapply(members, function(cf) parse_lambdas(fit_mx(occ[idx, ], bg_train, cf$vars, cf$fc, cf$rm)))
+  })
+}, c("refit_check", "boot_L", "n_boot"))
+saveRDS(list(final = L_final, boot = boot_L, members = members, thr_p10 = thr_p10),
+        file.path(proc_v4, "consensus_lambdas.rds"))
+```
+
+```{r}
+#| label: projection-grid
+#| code-summary: "Show code: projection domain, jurisdictions, known records, elevation"
+cur_suit <- rast(file.path(proc_v3, "suitability_current_aunz.tif"))   # code_3 current consensus suitability
+env_au   <- mask(crop(env_all[[sel_vars]], cur_suit), cur_suit)
+cells    <- which(!is.na(values(cur_suit)))
+env_cur  <- as.data.frame(values(env_au)[cells, sel_vars])
+p_cur    <- ens_pred(L_final, env_cur)
+cur_check <- max(abs(p_cur - values(cur_suit)[cells]))
+bin_cur  <- p_cur >= thr_p10
+area_km2 <- values(cellSize(cur_suit, unit = "km"))[cells]
+xy_cells <- xyFromCell(cur_suit, cells)
+to_rast  <- function(v, nm = "value") { r <- rast(cur_suit); r[cells] <- v; names(r) <- nm; r }
+
+world10 <- ne_countries(scale = 10, returnclass = "sf")
+aunz_sf <- world10 |> filter(admin %in% c("Australia", "New Zealand"))
+jur <- ne_states(country = c("Australia", "New Zealand"), returnclass = "sf") |>
+  mutate(jur = case_when(admin == "Australia" & name %in% c("Jervis Bay Territory", "Lord Howe Island", "Macquarie Island") ~ "Other territories",
+                         admin == "Australia" ~ name,
+                         region == "North Island" ~ "NZ North Island",
+                         region == "South Island" ~ "NZ South Island",
+                         TRUE ~ "NZ outlying islands")) |>
+  group_by(jur) |> summarise(geometry = st_union(geometry), .groups = "drop")
+jur_r   <- rasterize(vect(jur), cur_suit, field = "jur")
+jur_lv  <- levels(jur_r)[[1]]
+jur_c   <- jur_lv$jur[match(values(jur_r)[cells], jur_lv[[1]])]
+# cells not covered by the state polygons (coastal slivers) take the nearest jurisdiction
+miss <- which(is.na(jur_c))
+if (length(miss)) jur_c[miss] <- jur$jur[st_nearest_feature(st_as_sf(as.data.frame(xy_cells[miss, , drop = FALSE]), coords = c("x", "y"), crs = 4326), jur)]
+country_c <- if_else(grepl("^NZ", jur_c), "New Zealand", "Australia")
+jur_keep  <- names(which(c(tapply(area_km2, jur_c, sum)) > 1000))
+
+# Known Oceanian records (training records in Australia/NZ plus georeferenced ALA records), as in code_3
+ala <- read_csv(file.path(base_dir, "data", "ALA_occurence", "records-2026-02-04.csv"), show_col_types = FALSE) |>
+  transmute(lon = decimalLongitude, lat = decimalLatitude) |> drop_na()
+known <- bind_rows(occ |> filter(region == "Oceania") |> dplyr::select(lon, lat), ala) |> distinct()
+known_cell <- unique(match(cellFromXY(cur_suit, as.matrix(known)), cells)); known_cell <- known_cell[!is.na(known_cell)]
+known_ext  <- filter(known, lon >= 110, lon <= 180, lat >= -48, lat <= -8)          # records within the projection extent
+dist_known <- values(mask(distance(cur_suit, vect(known_ext, geom = c("lon", "lat"), crs = "EPSG:4326")) / 1000, cur_suit))[cells]
+
+# Elevation (WorldClim 2.1, 2.5 arc-min) for elevational shift metrics
+elev <- geodata::elevation_global(res = 2.5, path = file.path(base_dir, "data", "worldclim"))
+elev_c <- terra::extract(elev, xy_cells)[[1]]
+
+area_by <- function(w, g) c(tapply(area_km2 * w, g, sum, na.rm = TRUE))
+cur_area_jur <- area_by(bin_cur, jur_c)
+cur_area_cty <- area_by(bin_cur, country_c)
+```
+
+## Baseline species distribution model
+
+All projections used the consensus model developed for current climate (`code_3`), without
+refitting. The consensus is the unweighted mean cloglog output of three MaxEnt models, each pairing
+annual mean temperature (BIO1) with moisture-supply and aridity predictors (set H: BIO1, BIO12, BIO15,
+aridity; set C: BIO1, BIO2, BIO12, BIO15, aridity; set G: BIO1, BIO2, BIO13, BIO17, aridity). It was
+calibrated on 389 thinned occurrence records from the native and invaded ranges with a
+region-balanced target-group background, and it transferred well between continents (mean
+leave-one-region-out AUC = 0.86; AUC = 0.91 for Australia and New Zealand when no Oceanian records were
+used in training). Suitable climate was defined, as for current climate, by the 10th-percentile
+training-presence threshold (cloglog = `r fmt(thr_p10, 3)`). Clamping was retained, as in calibration.
+
+To make tens of thousands of projections tractable, predictions were computed directly from the
+fitted MaxEnt feature weights (lambdas). This reproduces the MaxEnt Java output to within
+`r formatC(pred_check, format = "e", digits = 0)` and reproduces the published current-climate map
+exactly (maximum difference `r formatC(cur_check, format = "e", digits = 0)`). To represent
+uncertainty in the SDM itself, the 30 bootstrap replicates of the code_3 consensus (presence records
+resampled with replacement within regions; all three members refitted) were regenerated with the
+same seed. Refitting the final model from the stored inputs reproduced the code_3 models exactly.
+
+```{r}
+#| label: future-climate
+#| code-summary: "Show code: GCM ensemble, download and derivation of future predictors"
+gcm_meta <- tribble(
+  ~gcm,            ~centre,                       ~ecs, ~core, ~v2,
+  "ACCESS-CM2",    "CSIRO-ARCCSS (Australia)",     4.7,  TRUE,  TRUE,
+  "ACCESS-ESM1-5", "CSIRO (Australia)",            3.9,  TRUE,  FALSE,
+  "CMCC-ESM2",     "CMCC (Italy)",                 3.6,  TRUE,  FALSE,
+  "CNRM-ESM2-1",   "CNRM-CERFACS (France)",        4.8,  TRUE,  FALSE,
+  "EC-Earth3-Veg", "EC-Earth Consortium (Europe)", 4.3,  TRUE,  FALSE,
+  "GISS-E2-1-G",   "NASA GISS (USA)",              2.7,  TRUE,  FALSE,
+  "IPSL-CM6A-LR",  "IPSL (France)",                4.6,  TRUE,  FALSE,
+  "MIROC6",        "MIROC (Japan)",                2.6,  TRUE,  TRUE,
+  "MPI-ESM1-2-HR", "MPI-M (Germany)",              3.0,  TRUE,  TRUE,
+  "MRI-ESM2-0",    "MRI (Japan)",                  3.2,  TRUE,  FALSE,
+  "UKESM1-0-LL",   "MOHC-NERC (UK)",               5.3,  FALSE, TRUE,
+  "CNRM-CM6-1",    "CNRM-CERFACS (France)",        4.8,  FALSE, TRUE) |>
+  mutate(likely = core & ecs >= 2.5 & ecs <= 4)          # within the IPCC AR6 'likely' ECS range
+gcm_core <- gcm_meta$gcm[gcm_meta$core]
+scen <- bind_rows(
+  expand_grid(gcm = gcm_core, ssp = ssps, period = periods, set = "core"),
+  expand_grid(gcm = c("UKESM1-0-LL", "CNRM-CM6-1"), ssp = c("245", "585"),
+              period = c("2041-2060", "2081-2100"), set = "v2_only")) |>
+  mutate(id = sprintf("%s_ssp%s_%s", gcm, ssp, period), file = file.path(fut_dir, paste0(id, ".tif")),
+         ssp_l = factor(ssp_lab[ssp], levels = ssp_lab), period = factor(period, levels = periods))
+
+# --- Preparation of future predictor stacks (skipped for scenarios already prepared; see prep_future_climate.R) ---
+Sys.setenv(GDAL_HTTP_MAX_RETRY = "5", GDAL_HTTP_RETRY_DELAY = "10", GDAL_DISABLE_READDIR_ON_OPEN = "EMPTY_DIR",
+           CPL_VSIL_CURL_ALLOWED_EXTENSIONS = ".tif")
+# Bioclimatic variables (WorldClim/dismo definitions) from cells x 12 monthly matrices
+bioclim_m <- function(pr, tn, tx) {
+  p1 <- pr + 1
+  q  <- sapply(1:12, function(m) rowSums(pr[, ((m - 1 + 0:2) %% 12) + 1]))        # rolling 3-month totals
+  cbind(bio1  = rowMeans((tn + tx) / 2),
+        bio2  = rowMeans(tx - tn),
+        bio12 = rowSums(pr),
+        bio13 = do.call(pmax, as.data.frame(pr)),
+        bio15 = 100 * sqrt(rowSums((p1 - rowMeans(p1))^2) / 11) / rowMeans(p1),
+        bio17 = do.call(pmin, as.data.frame(q)))
+}
+# Thornthwaite aridity index (envirem::aridityIndexThornthwaite) with Hargreaves PET (envirem::monthlyPET);
+# extraterrestrial radiation by latitude and month as in ENVIREM (envirem:::calcSolRad, year = 40)
+lat_rows <- yFromRow(cur_suit, 1:nrow(cur_suit))
+RA <- sapply(1:12, function(m) sapply(lat_rows, function(y) envirem:::calcSolRad(year = 40, lat = y, month = m)))
+RA_m <- RA[rowFromCell(cur_suit, cells), ]
+aridity_m <- function(pr, tn, tx) {
+  pet <- 0.0023 * (RA_m * 30) * ((tn + tx) / 2 + 17.8) * sqrt(tx - tn)
+  pet[pet < 0] <- 0
+  dry <- pr < pet
+  n <- rowSums(pet * dry); d <- rowSums((pet - pr) * dry)
+  ifelse(n == 0, 0, 100 * d / n)
+}
+read_monthly <- function(f) values(crop(rast(f), cur_suit))[cells, ]
+wc_dir <- file.path(base_dir, "data", "worldclim", "climate", "wc2.1_2.5m")
+cur_m  <- lapply(c(pr = "prec", tn = "tmin", tx = "tmax"), function(v)
+  read_monthly(file.path(wc_dir, sprintf("wc2.1_2.5m_%s_%02d.tif", v, 1:12))))
+ai_wc21_cur <- aridity_m(cur_m$pr, cur_m$tn, cur_m$tx)                   # current, same formulation
+ai_envirem  <- values(crop(env_all[["aridity_idx"]], cur_suit))[cells]  # ENVIREM baseline used in training
+fut_vars <- c("bio1", "bio2", "bio12", "bio13", "bio15", "bio17", "aridity_idx")
+prep_one <- function(i) {
+  s <- scen[i, ]
+  if (file.exists(s$file)) return("cached")
+  url <- sprintf("/vsicurl/https://geodata.ucdavis.edu/cmip6/2.5m/%s/ssp%s/wc2.1_2.5m_%%s_%s_ssp%s_%s.tif",
+                 s$gcm, s$ssp, s$gcm, s$ssp, s$period)
+  tryCatch({
+    m <- lapply(c(pr = "prec", tn = "tmin", tx = "tmax"), function(v) read_monthly(sprintf(url, v)))
+    ai_in <- pmin(pmax(ai_envirem + (aridity_m(m$pr, m$tn, m$tx) - ai_wc21_cur), 0), 100)   # anomaly on training baseline
+    x <- cbind(bioclim_m(m$pr, m$tn, m$tx), aridity_idx = ai_in)
+    r <- rast(cur_suit, nlyrs = length(fut_vars)); names(r) <- fut_vars
+    v <- matrix(NA_real_, ncell(r), length(fut_vars)); v[cells, ] <- x[, fut_vars]; values(r) <- v
+    writeRaster(r, s$file, overwrite = TRUE, datatype = "FLT4S", gdal = c("COMPRESS=DEFLATE", "PREDICTOR=3"))
+    "ok" }, error = function(e) paste("ERROR:", conditionMessage(e)))
+}
+# Socket (PSOCK) workers: forked processes cannot use libcurl safely on macOS
+todo <- which(!file.exists(scen$file))
+if (length(todo)) {
+  cl <- makeCluster(n_cores)
+  clusterEvalQ(cl, { suppressPackageStartupMessages(library(terra))
+    Sys.setenv(GDAL_HTTP_MAX_RETRY = "5", GDAL_HTTP_RETRY_DELAY = "10", GDAL_DISABLE_READDIR_ON_OPEN = "EMPTY_DIR",
+               CPL_VSIL_CURL_ALLOWED_EXTENSIONS = ".tif"); NULL })
+  cs_w <- wrap(cur_suit)
+  clusterExport(cl, c("scen", "cells", "RA_m", "ai_wc21_cur", "ai_envirem", "fut_vars", "bioclim_m", "aridity_m", "cs_w"),
+                envir = environment())
+  clusterEvalQ(cl, { cur_suit <- unwrap(cs_w); read_monthly <- function(f) values(crop(rast(f), cur_suit))[cells, ]; NULL })
+  prep_res <- parLapplyLB(cl, todo, prep_one)
+  stopCluster(cl)
+  print(table(unlist(prep_res)))
+}
+stopifnot(all(file.exists(scen$file)))
+
+# Validation of derived predictors against the layers used to train the model (current climate)
+bc_cur  <- bioclim_m(cur_m$pr, cur_m$tn, cur_m$tx)
+bc_val  <- map_dfr(colnames(bc_cur), ~ tibble(variable = .x, r = cor(bc_cur[, .x], env_cur[[.x]]),
+                                              max_abs_diff = max(abs(bc_cur[, .x] - env_cur[[.x]]))))
+ai_cor  <- cor(ai_envirem, ai_wc21_cur)
+ai_bias <- quantile(ai_wc21_cur - ai_envirem, c(0.05, 0.5, 0.95))
+# Check against the envirem implementation, supplying correctly oriented radiation layers
+w_chk  <- ext(145, 151, -40, -33)
+rd_chk <- function(v, nm) { r <- crop(rast(file.path(wc_dir, sprintf("wc2.1_2.5m_%s_%02d.tif", v, 1:12))), w_chk); names(r) <- paste0(nm, 1:12); r }
+tn_c <- rd_chk("tmin", "tmin_"); tx_c <- rd_chk("tmax", "tmax_"); pr_c <- rd_chk("prec", "precip_")
+lat_c <- yFromRow(tn_c, 1:nrow(tn_c))
+ra_c <- rast(lapply(1:12, function(m) init(tn_c[[1]], fun = rep(sapply(lat_c, function(y) envirem:::calcSolRad(40, y, m)), each = ncol(tn_c)))))
+names(ra_c) <- sprintf("et_solrad_%02d", 1:12); tm_c <- (tn_c + tx_c) / 2; names(tm_c) <- paste0("tmean_", 1:12)
+pet_c <- envirem::monthlyPET(tm_c, ra_c, tx_c - tn_c)
+ai_pkg <- envirem::aridityIndexThornthwaite(pr_c, pet_c)
+k_chk <- match(cellFromXY(cur_suit, xyFromCell(ai_pkg, 1:ncell(ai_pkg))), cells)
+envirem_check <- max(abs(ai_wc21_cur[k_chk] - values(ai_pkg)[, 1]), na.rm = TRUE)
+```
+
+## Future climate scenarios
+
+Future monthly minimum and maximum temperature and precipitation were obtained from the WorldClim 2.1
+CMIP6 downscaled projections at 2.5 arc-minutes [@fick2017; @eyring2016]. These are calibrated against
+the same 1970–2000 WorldClim baseline used to train the model, so changes in the bioclimatic variables
+are internally consistent with the training data. We used four SSPs spanning low to very high
+emissions, SSP1-2.6, SSP2-4.5, SSP3-7.0 and SSP5-8.5 [@oneill2016], and four 20-year periods:
+2021–2040, 2041–2060, 2061–2080 and 2081–2100.
+
+GCMs were selected using three criteria. (i) Monthly temperature and precipitation had to be
+available for all SSP × period combinations; this excluded GFDL-ESM4. (ii) ECS had to lie within the
+IPCC AR6 very likely range of 2–5 K [@forster2021; @meehl2020; @zelinka2020]; this excluded
+UKESM1-0-LL (ECS ≈ 5.3 K) and INM-CM5-0 (≈ 1.9 K). (iii) Only one model per modelling centre and model
+family was retained, to limit dependence among ensemble members [@knutti2017]; this excluded
+CNRM-CM6-1 in favour of CNRM-ESM2-1. The two Australian ACCESS models were both kept because they
+differ in their atmosphere and land components and are the national reference models for Australian
+projections [@grose2020]. The resulting core ensemble has ten GCMs (@tbl-gcm), giving 160
+GCM × SSP × period combinations. For sensitivity analyses we defined a "likely-ECS" subset of the six
+core models with ECS of 2.5–4 K, and we also reproduced the five-GCM ensemble of the previous analysis,
+which includes UKESM1-0-LL and CNRM-CM6-1.
+
+BIO1, BIO2, BIO12, BIO13, BIO15 and BIO17 were computed from the monthly data using the WorldClim
+definitions. Applied to current monthly climate, this reproduces the WorldClim 2.1 bioclimatic layers
+used in training exactly (maximum difference < 10⁻⁵). The Thornthwaite aridity index
+[@thornthwaite1948] was computed as in ENVIREM [@title2018]: 100 × the annual sum of monthly
+water deficits (PET − P in months with P < PET) divided by the sum of PET in those months, with
+monthly PET from the Hargreaves equation [@hargreaves1985] and extraterrestrial radiation by latitude
+and month.^[We computed extraterrestrial radiation directly with `envirem:::calcSolRad()`.
+`envirem::ETsolradRasters()` (version 3.1) assigns radiation by column rather than by row when used
+with `terra`, so it varies with longitude on non-square grids. With correctly oriented radiation,
+our implementation reproduces `envirem::monthlyPET()` and `envirem::aridityIndexThornthwaite()` to
+within `r formatC(envirem_check, format = "e", digits = 0)`.] The aridity layer used in training is
+the published ENVIREM layer, which is based on an earlier WorldClim baseline. The same index
+recomputed from WorldClim 2.1 is closely correlated with it (r = `r fmt(ai_cor, 3)`) but not identical
+(90% of differences between `r fmt(ai_bias[1], 1)` and `r fmt(ai_bias[3], 1)` index units;
+@suppfig-validation a). We therefore applied the future change as an anomaly: future aridity =
+ENVIREM aridity + (aridity from future monthly climate − aridity from WorldClim 2.1 current monthly
+climate), bounded to the index range 0–100. Future aridity is thus derived from each GCM's own
+temperature and precipitation and anchored to the training baseline.
+
+## Projection, range change and spread metrics
+
+The consensus model was projected to each of the 160 scenarios across the land area of Australia and
+New Zealand. For each SSP × period combination we computed the ensemble median of suitability across
+GCMs and, for each cell, the proportion of GCMs projecting suitable climate ("agreement"). Cells
+suitable now were classified as *stable* if at least half of the GCMs projected them to remain
+suitable, and as *lost* otherwise. Cells unsuitable now were classified as *gained* if at least half
+of the GCMs projected them to become suitable. Changes were labelled *robust* when at least 80% of
+GCMs agreed. Areas were computed from true, latitude-dependent cell areas. Area metrics are reported
+as the median and range across the ten GCMs, computed from each GCM's own binary projection rather
+than from the ensemble-median map. For each scenario we also calculated the proportion of grid cells
+containing a known Oceanian record (training records and ALA records; `r length(known_cell)` cells)
+that remained suitable. We also calculated the shift in the area-weighted latitude centroid and the
+mean elevation of suitable climate, separately for Australia and New Zealand.
+
+## Extrapolation and clamping
+
+Future climates were compared with the calibration environments (presence and training-background
+points) in two ways. Univariate novelty was measured with the multivariate environmental similarity
+surface (MESS < 0) [@elith2010], as for current climate. Novel combinations of individually analogue
+values were measured with the ExDet NT2 statistic [@mesgaran2014]: the Mahalanobis distance of a cell
+from the centroid of the reference data, divided by the maximum distance within the reference data
+(NT2 > 1 indicates a novel combination). Because the model was fitted with clamping, predictions
+for values beyond the training range are held at the edge of the fitted response. We quantified how
+much this affects projections by comparing clamped and unclamped predictions. We report suitable
+area both including and excluding cells with novel climate.
+
+```{r}
+#| label: extrapolation-functions
+#| code-summary: "Show code: MESS and ExDet NT2"
+# Reference environments for extrapolation diagnostics: presences + training background (as in code_3)
+ref_env <- as.data.frame(bind_rows(occ[, sel_vars], bg_train[, sel_vars]))
+ref_sorted <- lapply(ref_env, sort)
+# MESS (Elith et al. 2010), vectorised; returns minimum similarity and the most dissimilar variable
+mess_df <- function(x) {
+  sim <- sapply(sel_vars, function(v) {
+    r <- ref_sorted[[v]]; lo <- r[1]; hi <- r[length(r)]; p <- x[[v]]
+    f <- 100 * findInterval(p, r, left.open = TRUE) / length(r)      # % of reference values < p
+    ifelse(f == 0, 100 * (p - lo) / (hi - lo), ifelse(f <= 50, 2 * f, ifelse(f < 100, 2 * (100 - f), 100 * (hi - p) / (hi - lo))))
+  })
+  list(mess = apply(sim, 1, min), mod = sel_vars[apply(sim, 1, which.min)])
+}
+# ExDet NT2 (Mesgaran et al. 2014): Mahalanobis distance relative to the maximum within the reference data
+ref_mu <- colMeans(ref_env); ref_S <- cov(ref_env)
+d_ref_max <- sqrt(max(mahalanobis(ref_env, ref_mu, ref_S)))
+nt2_df <- function(x) sqrt(mahalanobis(as.matrix(x[, sel_vars]), ref_mu, ref_S)) / d_ref_max
+novelty <- function(x) { m <- mess_df(x); n2 <- nt2_df(x)
+  list(cls = ifelse(m$mess < 0, 2L, ifelse(n2 > 1, 1L, 0L)), mess = m$mess, mod = m$mod) }   # 0 analogue, 1 combination, 2 univariate
+nov_cur <- novelty(env_cur)
+mess_check <- cor(nov_cur$mess, values(rast(file.path(proc_v3, "mess_current_aunz.tif")))[cells], use = "complete")
+```
+
+```{r}
+#| label: project-scenarios
+#| code-summary: "Show code: project the consensus to all 168 scenarios"
+# Project the consensus to every GCM x SSP x period; keep per-cell suitability (scaled integers) and novelty class,
+# plus per-scenario summaries. Forked workers (no Java needed for lambda-based prediction).
+swap <- function(base, fut, v) { base[v] <- fut[v]; base }
+proj_one <- function(i) {
+  x <- as.data.frame(values(rast(scen$file[i]))[cells, sel_vars])
+  na <- !complete.cases(x)
+  if (any(na)) x[na, ] <- env_cur[na, ]        # (coastal cells missing in the CMIP6 grid keep current climate)
+  s   <- ens_pred(L_final, x)
+  u   <- ens_pred(L_final, x, clamp = FALSE)
+  s_t <- ens_pred(L_final, swap(env_cur, x, temp_vars))      # temperature change only
+  s_m <- ens_pred(L_final, swap(env_cur, x, moist_vars))     # moisture change only
+  nv  <- novelty(x)
+  b <- s >= thr_p10
+  w <- function(z, g) c(tapply(area_km2 * z, g, sum))
+  summ <- bind_rows(lapply(list(all = rep("Australia + New Zealand", length(cells)), cty = country_c, jur = jur_c), function(g)
+    tibble(unit = names(w(b, g)), suitable = w(b, g), gain = w(b & !bin_cur, g), loss = w(!b & bin_cur, g),
+           stable = w(b & bin_cur, g), suitable_analogue = w(b & nv$cls == 0, g),
+           suitable_temp_only = w(s_t >= thr_p10, g), suitable_moist_only = w(s_m >= thr_p10, g),
+           suitable_unclamped = w(u >= thr_p10, g), suitable_mss = w(s >= thr_mss, g),
+           novel_univariate = w(nv$cls == 2, g), novel_combination = w(nv$cls == 1, g),
+           clamp_affected = w(abs(s - u) > 0.05, g),
+           lat_centroid = c(tapply(xy_cells[, 2] * area_km2 * b, g, sum)) / w(b, g),
+           elev_mean = c(tapply(elev_c * area_km2 * b, g, sum, na.rm = TRUE)) / w(b, g),
+           lat_centroid_w = c(tapply(xy_cells[, 2] * area_km2 * s, g, sum)) / w(s, g))))
+  summ$known_suitable <- NA_real_; summ$known_suitable[1] <- mean(b[known_cell])
+  wm <- function(z, k) sum(z[k] * area_km2[k]) / sum(area_km2[k])
+  clim <- map_dfr(list(`Current suitable range` = bin_cur, `All land` = rep(TRUE, length(cells))), function(k)
+    tibble(d_bio1 = wm(x$bio1 - env_cur$bio1, k), d_bio2 = wm(x$bio2 - env_cur$bio2, k),
+           d_bio12_pct = 100 * (wm(x$bio12, k) / wm(env_cur$bio12, k) - 1),
+           d_bio17_pct = 100 * (wm(x$bio17, k) / wm(env_cur$bio17, k) - 1),
+           d_aridity = wm(x$aridity_idx - env_cur$aridity_idx, k)), .id = "domain") |> mutate(id = scen$id[i], .before = 1)
+  summ$n_na <- sum(na)
+  list(s = as.integer(round(s * 1e4)), cls = as.raw(nv$cls), summ = mutate(summ, id = scen$id[i], .before = 1), clim = clim)
+}
+cached("projections", {
+  proj <- mclapply(seq_len(nrow(scen)), proj_one, mc.cores = n_cores, mc.preschedule = FALSE)
+  S   <- sapply(proj, `[[`, "s");   colnames(S) <- scen$id          # suitability x 1e4
+  NOV <- sapply(proj, `[[`, "cls"); colnames(NOV) <- scen$id
+  summ_all <- bind_rows(lapply(proj, `[[`, "summ")) |> left_join(dplyr::select(scen, id, gcm, ssp, ssp_l, period, set), by = "id")
+  clim_all <- bind_rows(lapply(proj, `[[`, "clim")) |> left_join(dplyr::select(scen, id, gcm, ssp, ssp_l, period, set), by = "id")
+  rm(proj)
+}, c("S", "NOV", "summ_all", "clim_all"))
+```
+
+```{r}
+#| label: current-summaries
+#| code-summary: "Show code: area summaries"
+# Current-climate equivalents of the scenario summaries
+w0 <- function(z, g) c(tapply(area_km2 * z, g, sum))
+summ_cur <- bind_rows(lapply(list(all = rep("Australia + New Zealand", length(cells)), cty = country_c, jur = jur_c), function(g)
+  tibble(unit = names(w0(bin_cur, g)), suitable_cur = w0(bin_cur, g), suitable_mss_cur = w0(p_cur >= thr_mss, g),
+         lat_centroid_cur = c(tapply(xy_cells[, 2] * area_km2 * bin_cur, g, sum)) / w0(bin_cur, g),
+         elev_mean_cur = c(tapply(elev_c * area_km2 * bin_cur, g, sum, na.rm = TRUE)) / w0(bin_cur, g))))
+summ_all <- summ_all |> left_join(summ_cur, by = "unit") |>
+  mutate(pct_change = 100 * (suitable - suitable_cur) / suitable_cur,
+         pct_change_mss = 100 * (suitable_mss - suitable_mss_cur) / suitable_mss_cur)
+known_cur <- mean(bin_cur[known_cell])
+write_csv(summ_all, file.path(out_dir, "scenario_summaries_all.csv"))
+
+core <- filter(summ_all, set == "core")
+ens_summ <- core |> group_by(unit, ssp, ssp_l, period) |>
+  summarise(across(c(suitable, gain, loss, stable, pct_change, suitable_analogue, novel_univariate, novel_combination,
+                     clamp_affected, known_suitable, lat_centroid, elev_mean, suitable_temp_only, suitable_moist_only,
+                     pct_change_mss),
+                   list(med = ~ median(.x, na.rm = TRUE), lo = ~ min(.x, na.rm = TRUE), hi = ~ max(.x, na.rm = TRUE))),
+            .groups = "drop")
+write_csv(ens_summ, file.path(out_dir, "ensemble_summaries.csv"))
+```
+
+```{r}
+#| label: ensemble-maps
+#| code-summary: "Show code: ensemble median, GCM agreement and change classes"
+# Per SSP x period: ensemble-median suitability, fraction of GCMs projecting suitable, fraction novel
+grp <- scen |> filter(set == "core") |> distinct(ssp, period) |> arrange(ssp, period)
+ens_maps <- pmap(grp, function(ssp, period) {
+  ids <- scen$id[scen$set == "core" & scen$ssp == ssp & scen$period == period]
+  sm  <- S[, ids] / 1e4
+  list(ssp = ssp, period = period,
+       med   = matrixStats::rowMedians(sm),
+       agree = rowMeans(sm >= thr_p10),
+       novel = rowMeans(matrix(as.integer(NOV[, ids]), ncol = length(ids)) > 0),
+       novel_uni = rowMeans(matrix(as.integer(NOV[, ids]), ncol = length(ids)) == 2),
+       sd    = matrixStats::rowSds(sm))
+})
+names(ens_maps) <- sprintf("%s_%s", grp$ssp, grp$period)
+# change class: 0 stable unsuitable, 1 loss (>=50% GCMs unsuitable), 2 stable suitable, 3 gain (>=50% GCMs suitable)
+chg_class <- function(e) ifelse(bin_cur, ifelse(e$agree >= 0.5, 2L, 1L), ifelse(e$agree >= 0.5, 3L, 0L))
+for (k in names(ens_maps)) {
+  e <- ens_maps[[k]]
+  writeRaster(c(to_rast(e$med, "median_suitability"), to_rast(e$agree, "gcm_agreement_suitable"),
+                to_rast(e$sd, "gcm_sd"), to_rast(e$novel, "frac_gcm_novel"), to_rast(chg_class(e), "change_class")),
+              file.path(proc_v4, sprintf("ensemble_ssp%s.tif", k)), overwrite = TRUE)
+}
+```
+
+## Attribution of projected change
+
+To determine which climatic changes drive the projected range shifts, each scenario was re-projected
+with only the temperature predictors (BIO1, BIO2) changed to future values and the moisture
+predictors held at current values, and vice versa. At finer resolution, for the two focal scenarios
+(SSP2-4.5, 2041–2060; SSP3-7.0, 2081–2100), each predictor was changed singly. In cells classified as
+lost or gained, the predictor whose individual change produced the largest decrease or increase in
+suitability (ensemble median across GCMs) was mapped as the dominant driver.
+
+```{r}
+#| label: drivers
+#| code-summary: "Show code: attribution of change to individual predictors"
+# Attribution: substitute each predictor's future value singly (others at current) for the focal scenarios
+cached("drivers", {
+  drv <- map(focal, function(k) {
+    ids <- scen$id[scen$set == "core" & sprintf("%s_%s", scen$ssp, scen$period) == k]
+    per_gcm <- mclapply(ids, function(id) {
+      x <- as.data.frame(values(rast(scen$file[scen$id == id]))[cells, sel_vars])
+      na <- !complete.cases(x); if (any(na)) x[na, ] <- env_cur[na, ]
+      list(d = sapply(sel_vars, function(v) ens_pred(L_final, swap(env_cur, x, v)) - p_cur), x = as.matrix(x),
+           clamp = ens_pred(L_final, x) - ens_pred(L_final, x, clamp = FALSE))
+    }, mc.cores = n_cores)
+    arr <- simplify2array(lapply(per_gcm, `[[`, "d"))     # cells x vars x GCMs
+    xa <- simplify2array(lapply(per_gcm, `[[`, "x"))
+    x_med <- sapply(sel_vars, function(v) matrixStats::rowMedians(xa[, v, ]))
+    list(delta_med = sapply(sel_vars, function(v) matrixStats::rowMedians(arr[, v, ])), x_med = x_med,
+         clamp_med = matrixStats::rowMedians(sapply(per_gcm, `[[`, "clamp")),
+         area_loss_single = apply(arr, c(2, 3), function(d) sum(area_km2 * (bin_cur & (p_cur + d) < thr_p10))),
+         area_gain_single = apply(arr, c(2, 3), function(d) sum(area_km2 * (!bin_cur & (p_cur + d) >= thr_p10))))
+  })
+  names(drv) <- focal
+}, c("drv"))
+dom_driver <- function(k) {
+  e <- ens_maps[[k]]; dm <- drv[[k]]$delta_med; cl <- chg_class(e)
+  out <- rep(NA_integer_, length(cells))
+  out[cl == 1] <- apply(dm[cl == 1, , drop = FALSE], 1, which.min)
+  out[cl == 3] <- apply(dm[cl == 3, , drop = FALSE], 1, which.max)
+  out
+}
+drv_tab <- map_dfr(focal, function(k) {
+  tibble(scenario = k, variable = sel_vars,
+         loss_med = apply(drv[[k]]$area_loss_single, 1, median), gain_med = apply(drv[[k]]$area_gain_single, 1, median))
+})
+```
+
+## Partitioning of uncertainty
+
+For each period, every bootstrap replicate of the consensus was projected to every GCM and SSP
+(4 SSPs × 10 GCMs × 30 replicates = 1,200 projections per period). Change in suitable area was
+computed relative to each replicate's own current-climate projection and threshold. The variance in
+projected percentage change was partitioned by analysis of variance into main effects of emissions
+scenario, GCM and SDM replicate, and their interactions [@dinizfilho2009; @buisson2010]. For the
+focal scenarios we also mapped the standard deviation of suitability among GCMs (final model) and
+among SDM replicates (averaged across GCMs).
+
+```{r}
+#| label: bootstrap-projection
+#| code-summary: "Show code: project every bootstrap replicate to every scenario"
+# SDM (parameter) uncertainty: every bootstrap consensus projected to every core scenario.
+# Area change is computed relative to each replicate's own current-climate projection.
+cached("bootstrap_projections", {
+  cur_boot <- sapply(boot_L, function(Lb) { s <- ens_pred(Lb, env_cur); thr <- unname(quantile(ens_pred(Lb, occ), 0.10))
+    c(thr = thr, all = sum(area_km2 * (s >= thr)), c(tapply(area_km2 * (s >= thr), country_c, sum))) })
+  thr_boot <- cur_boot["thr", ]
+  core_idx <- which(scen$set == "core")
+  boot_one <- function(i) {
+    x <- as.data.frame(values(rast(scen$file[i]))[cells, sel_vars])
+    na <- !complete.cases(x); if (any(na)) x[na, ] <- env_cur[na, ]
+    sb <- sapply(seq_along(boot_L), function(b) ens_pred(boot_L[[b]], x))
+    bb <- sweep(sb, 2, thr_boot, ">=")
+    ar <- rbind(all = colSums(area_km2 * bb), rowsum(area_km2 * bb, country_c))
+    key <- sprintf("%s_%s", scen$ssp[i], scen$period[i])
+    list(id = scen$id[i], area = ar, sd = if (key %in% focal) apply(sb, 1, sd) else NULL)
+  }
+  bproj <- mclapply(core_idx, boot_one, mc.cores = n_cores, mc.preschedule = FALSE)
+  boot_area <- map_dfr(bproj, function(z) as_tibble(t(z$area)) |> mutate(id = z$id, boot = seq_len(n_boot))) |>
+    pivot_longer(c(all, Australia, `New Zealand`), names_to = "unit", values_to = "suitable") |>
+    mutate(unit = recode(unit, all = "Australia + New Zealand")) |>
+    left_join(tibble(boot = seq_len(n_boot), `Australia + New Zealand` = cur_boot["all", ], Australia = cur_boot["Australia", ],
+                     `New Zealand` = cur_boot["New Zealand", ]) |>
+                pivot_longer(-boot, names_to = "unit", values_to = "suitable_cur"), by = c("boot", "unit")) |>
+    mutate(pct_change = 100 * (suitable - suitable_cur) / suitable_cur) |>
+    left_join(dplyr::select(scen, id, gcm, ssp, ssp_l, period), by = "id")
+  sdm_sd <- lapply(focal, function(k) { ids <- scen$id[core_idx][sprintf("%s_%s", scen$ssp[core_idx], scen$period[core_idx]) == k]
+    rowMeans(sapply(Filter(function(z) z$id %in% ids, bproj), `[[`, "sd")) })
+  names(sdm_sd) <- focal
+  rm(bproj)
+}, c("cur_boot", "thr_boot", "boot_area", "sdm_sd", "core_idx"))
+write_csv(boot_area, file.path(out_dir, "bootstrap_scenario_areas.csv"))
+```
+
+```{r}
+#| label: variance-partition
+#| code-summary: "Show code: ANOVA partitioning of uncertainty"
+# Partition of variance in projected % change in suitable area among emissions scenario, GCM and SDM (bootstrap)
+vp <- boot_area |> group_by(unit, period) |> group_modify(function(d, k) {
+  a <- anova(lm(pct_change ~ ssp_l * gcm + ssp_l * factor(boot) + gcm * factor(boot), data = d))
+  ss <- setNames(a$`Sum Sq`, rownames(a))
+  tibble(component = c("Emissions scenario (SSP)", "Climate model (GCM)", "SDM parameters (bootstrap)", "Interactions"),
+         ss = c(ss["ssp_l"], ss["gcm"], ss["factor(boot)"], sum(ss[grepl(":", names(ss))]) + ss["Residuals"])) |>
+    mutate(frac = ss / sum(ss))
+}) |> ungroup()
+write_csv(vp, file.path(out_dir, "variance_partitioning.csv"))
+```
+
+## Management categories
+
+To support surveillance planning, cells were classified by current suitability and GCM agreement
+into: *persistent* (suitable now; ≥ 80% of GCMs suitable in future), *at risk* (suitable now; 20–80%),
+*likely loss* (suitable now; ≤ 20%), *emerging, robust* (unsuitable now; ≥ 80%), *emerging, possible*
+(unsuitable now; 50–80%) and *unsuitable*. Emerging areas more than 100 km from any known record were
+identified as candidate areas for anticipatory surveillance.
+
+## Sensitivity analyses
+
+We compared projected change in suitable area obtained with (i) the core ensemble, (ii) the
+likely-ECS subset and (iii) the five-GCM ensemble of the previous analysis, for the scenarios and
+periods used previously (SSP2-4.5 and SSP5-8.5; 2041–2060 and 2081–2100). We also recomputed area
+change using the threshold that maximises sensitivity plus specificity (cloglog =
+`r fmt(thr_mss, 3)`), which was used in the previous analysis.
+
+```{r}
+#| label: v2-comparison
+#| code-summary: "Show code: quantify problems in the previous analysis"
+# (1) v2 delta-change aridity vs physically derived aridity, for the two v2 stacks that bracket the scenario range
+v2_cmp <- map_dfr(c("MPI-ESM1-2-HR_ssp245_2041-2060", "ACCESS-CM2_ssp585_2081-2100"), function(id) {
+  v2 <- rast(file.path(base_dir, "data", "future_climate", paste0(id, "_all_selected.tif")))
+  v2 <- resample(crop(v2, cur_suit), cur_suit, method = "near")
+  v4 <- rast(file.path(fut_dir, paste0(id, ".tif")))
+  tibble(id = id, cell = cells, v2 = values(v2[["aridity_idx"]])[cells, 1],
+         v4 = values(v4[["aridity_idx"]])[cells, 1], current = env_cur$aridity_idx)
+}) |> drop_na()
+v2_ai_stats <- v2_cmp |> group_by(id) |>
+  summarise(pct_above_100 = 100 * mean(v2 > 100), max_v2 = max(v2), max_v4 = max(v4),
+            mean_change_v2 = mean(v2 - current), mean_change_v4 = mean(v4 - current),
+            pct_outside_train_v2 = 100 * mean(v2 > max(ref_env$aridity_idx)),
+            pct_outside_train_v4 = 100 * mean(v4 > max(ref_env$aridity_idx)))
+# (2) Area bias of the single-latitude cell-area approximation used in v2
+area_v2_approx <- sum(bin_cur) * prod(res(cur_suit)) * 111^2 * cos(mean(ext(cur_suit)[3:4]) * pi / 180)
+area_true <- sum(area_km2 * bin_cur)
+# (3) Sensitivity of projected change to the GCM ensemble (all with the code_3 consensus)
+gcm_sets <- list(`Core ensemble (10 GCMs)` = gcm_core, `Likely-ECS subset (6 GCMs)` = gcm_meta$gcm[gcm_meta$likely],
+                 `v2 ensemble (5 GCMs)` = gcm_meta$gcm[gcm_meta$v2])
+set_cmp <- imap_dfr(gcm_sets, function(g, nm) summ_all |>
+  filter(unit == "Australia + New Zealand", gcm %in% g, ssp %in% c("245", "585"), period %in% c("2041-2060", "2081-2100")) |>
+  group_by(ssp_l, period) |> summarise(n = n(), med = median(pct_change), lo = min(pct_change), hi = max(pct_change), .groups = "drop") |>
+  mutate(ensemble = nm))
+v2_res <- read_csv(file.path(base_dir, "outputs_2", "per_gcm_results_v2.csv"), show_col_types = FALSE)
+v2_loro <- read_csv(file.path(base_dir, "outputs_2", "loro_cv_results_v2.csv"), show_col_types = FALSE)
+v2_unc <- read_csv(file.path(base_dir, "outputs_2", "ensemble_uncertainty_v2.csv"), show_col_types = FALSE)
+thr_cmp <- core |> filter(unit == "Australia + New Zealand", ssp %in% c("245", "585"), period %in% c("2041-2060", "2081-2100")) |>
+  group_by(ssp_l, period) |> summarise(n = n(), med = median(pct_change_mss), lo = min(pct_change_mss), hi = max(pct_change_mss), .groups = "drop") |>
+  mutate(ensemble = "Core ensemble, MSS threshold")
+v2_cur_area <- read_csv(file.path(base_dir, "outputs_2", "range_shift_summary_v2.csv"), show_col_types = FALSE)$current_suitable_km2[1]
+```
+
+```{r}
+#| label: plot-helpers
+#| code-summary: "Show code: plotting helpers"
+map_base <- list(coord_sf(xlim = c(112, 179), ylim = c(-47.5, -10), expand = FALSE),
+                 labs(x = NULL, y = NULL),
+                 theme(panel.background = element_rect(fill = "#f4f8fb", colour = NA),
+                       axis.text = element_blank(), panel.grid = element_blank()))
+# Long data frame of cell values for faceted maps (aggregated 2x for plotting)
+map_df <- function(vals, keys, fact = 2, fun = "mean") {
+  imap_dfr(vals, function(v, k) {
+    r <- to_rast(v); if (fact > 1) r <- aggregate(r, fact, fun = fun, na.rm = TRUE)
+    as.data.frame(r, xy = TRUE, na.rm = TRUE) |> mutate(key = k)
+  }) |> left_join(keys, by = "key")
+}
+key_lab <- function(k) tibble(key = k, ssp_l = factor(ssp_lab[sub("_.*", "", k)], levels = ssp_lab),
+                              period = factor(sub(".*_", "", k), levels = periods))
+known_pts <- known[!is.na(match(cellFromXY(cur_suit, as.matrix(known)), cells)), ]   # records on Australian/NZ land
+```
+
+All analyses were run in R `r paste(R.version$major, R.version$minor, sep = ".")` using `terra`
+`r packageVersion("terra")`, `sf`, `dismo` `r packageVersion("dismo")` (bundled MaxEnt 3.4), `envirem`
+`r packageVersion("envirem")`, `predicts` and the `tidyverse`.
+
+# Results
+
+```{r}
+#| label: results-values
+#| include: false
+mns <- function(x, d = 0) sub("^-", "−", formatC(x, format = "f", digits = d))
+sgn <- function(x) sub("^-", "−", sprintf("%+.0f", x))
+es  <- function(u, s, p) filter(ens_summ, unit == u, ssp == s, period == p)
+pc  <- function(u, s, p) { e <- es(u, s, p); sprintf("%s%% (GCM range %s to %s%%)", sgn(e$pct_change_med), sgn(e$pct_change_lo), sgn(e$pct_change_hi)) }
+pcm <- function(u, s, p) sgn(es(u, s, p)$pct_change_med)
+kn  <- function(s, p) fmt(100 * es("Australia + New Zealand", s, p)$known_suitable_med, 0)
+cl  <- function(s, p, v = "d_bio1", f = median) f(filter(clim_all, set == "core", domain == "Current suitable range", ssp == s, period == p)[[v]])
+att <- core |> filter(unit == "Australia") |>
+  mutate(t = 100 * (suitable_temp_only - suitable_cur) / suitable_cur, m = 100 * (suitable_moist_only - suitable_cur) / suitable_cur) |>
+  group_by(ssp, period) |> summarise(t = median(t), m = median(m), c = median(pct_change), .groups = "drop")
+at  <- function(s, p, v) filter(att, ssp == s, period == p)[[v]]
+vpv <- function(u, p, comp) 100 * filter(vp, unit == u, period == p, component == comp)$frac
+sc  <- function(nm, s, p) filter(set_cmp, ensemble == nm, ssp_l == ssp_lab[s], period == p)$med
+dl  <- function(k, v, what = "loss_med") filter(drv_tab, scenario == k, variable == v)[[what]] / 1000
+mg  <- function(k, u, cls) { x <- filter(mg_area, scenario == k, unit == u, class == cls)$area; if (length(x)) x / 1000 else 0 }
+loss_tot <- function(k) { s <- sub("_.*", "", k); p <- sub(".*_", "", k); es("Australia + New Zealand", s, p)$loss_med / 1000 }
+au_lat <- function(s) median(filter(core, unit == "Australia", ssp == s, period == "2081-2100")$lat_centroid -
+                               filter(core, unit == "Australia", ssp == s, period == "2081-2100")$lat_centroid_cur)
+au_el  <- function(s) median(filter(core, unit == "Australia", ssp == s, period == "2081-2100")$elev_mean -
+                               filter(core, unit == "Australia", ssp == s, period == "2081-2100")$elev_mean_cur)
+ex <- ens_summ |> filter(unit == "Australia + New Zealand")
+```
+
+## Problems in the previous analysis and their effects
+
+The re-examination identified thirteen problems (@supptbl-v2). The most consequential was the
+derivation of future aridity. The ratio-based delta change produced aridity values above the
+theoretical maximum of the index in `r fmt(v2_ai_stats$pct_above_100[v2_ai_stats$id == "MPI-ESM1-2-HR_ssp245_2041-2060"], 0)`%
+of Australian and New Zealand land under MPI-ESM1-2-HR SSP2-4.5 2041–2060 and in
+`r fmt(v2_ai_stats$pct_above_100[v2_ai_stats$id == "ACCESS-CM2_ssp585_2081-2100"], 0)`% under ACCESS-CM2
+SSP5-8.5 2081–2100, where values reached `r fmt(v2_ai_stats$max_v2[v2_ai_stats$id == "ACCESS-CM2_ssp585_2081-2100"], 0)`
+(@suppfig-validation b). In the second scenario the mean increase in aridity was
+`r fmt(v2_ai_stats$mean_change_v2[v2_ai_stats$id == "ACCESS-CM2_ssp585_2081-2100"], 1)` index units under the v2
+method but `r fmt(v2_ai_stats$mean_change_v4[v2_ai_stats$id == "ACCESS-CM2_ssp585_2081-2100"], 1)` units when
+aridity was derived from the same GCM's monthly climate. With the v2 method,
+`r fmt(v2_ai_stats$pct_outside_train_v2[v2_ai_stats$id == "ACCESS-CM2_ssp585_2081-2100"], 0)`% of cells
+had aridity beyond the calibration range; with the corrected method, none did. This artefact,
+not climate change, accounts for most of the 60–81% extrapolation reported previously. The model
+projected in v2 also failed to transfer between regions under current climate (leave-one-region-out
+AUC = `r fmt(v2_loro$auc[v2_loro$region == "Oceania"])` for Oceania), so its future projections had no
+demonstrated predictive basis. The single-latitude cell-area approximation overestimated suitable
+area by `r fmt(100 * (area_v2_approx / area_true - 1), 0)`% for the current map. Including the three
+high-sensitivity GCMs of the v2 ensemble inflated projected losses relative to the core ensemble,
+most at the end of the century (SSP2-4.5 2081–2100: `r sgn(sc("v2 ensemble (5 GCMs)", "245", "2081-2100"))`%
+vs. `r sgn(sc("Core ensemble (10 GCMs)", "245", "2081-2100"))`%; @supptbl-sens, @suppfig-sens).
+
+## Projected climate change across the current range
+
+Across the current suitable range, every GCM projects warming in every scenario (@tbl-gcm,
+@fig-climate). By 2021–2040, annual mean temperature is about `r fmt(cl("245", "2021-2040"), 1)` °C above the
+1970–2000 baseline in all SSPs, which is essentially the warming that has already occurred. By
+2081–2100 the ensemble-median warming is `r fmt(cl("126", "2081-2100"), 1)` °C (SSP1-2.6),
+`r fmt(cl("245", "2081-2100"), 1)` °C (SSP2-4.5), `r fmt(cl("370", "2081-2100"), 1)` °C (SSP3-7.0) and
+`r fmt(cl("585", "2081-2100"), 1)` °C (SSP5-8.5), with a GCM range of about ±1 °C around each median.
+Projected changes in annual precipitation are small and of inconsistent sign (ensemble medians
+`r sgn(cl("126", "2081-2100", "d_bio12_pct"))` to `r sgn(cl("585", "2081-2100", "d_bio12_pct"))`%; GCM range
+`r sgn(min(filter(clim_all, set == "core", domain == "Current suitable range")$d_bio12_pct))` to
+`r sgn(max(filter(clim_all, set == "core", domain == "Current suitable range")$d_bio12_pct))`%). The aridity index
+nevertheless increases in almost all GCM × scenario combinations (median
+`r fmt(cl("245", "2041-2060", "d_aridity"), 1)` units by 2041–2060 under SSP2-4.5 and
+`r fmt(cl("585", "2081-2100", "d_aridity"), 1)` units by 2081–2100 under SSP5-8.5), because evaporative
+demand rises with temperature while rainfall changes little. Change in diurnal temperature range is
+negligible (< 0.5 °C). The greatest warming is projected for inland and northern Australia, and the
+least for New Zealand and Tasmania (@suppfig-climmaps).
+
+::: {.primary-table}
+```{r}
+#| label: tbl-gcm
+#| tbl-cap: "Global climate models. ECS = equilibrium climate sensitivity (approximate values from @meehl2020 and @zelinka2020). Climate changes are area-weighted means over the currently suitable range in Australia and New Zealand, relative to 1970–2000. Core = ensemble used for all projections; v2 = ensemble of the previous analysis (UKESM1-0-LL and CNRM-CM6-1 are used only in the sensitivity analysis)."
+gcm_clim <- clim_all |> filter(domain == "Current suitable range") |>
+  filter((ssp == "245" & period == "2041-2060") | (ssp == "585" & period == "2081-2100")) |>
+  mutate(key = ifelse(ssp == "245", "a", "b")) |>
+  dplyr::select(gcm, key, d_bio1, d_bio12_pct, d_aridity) |>
+  pivot_wider(names_from = key, values_from = c(d_bio1, d_bio12_pct, d_aridity))
+gcm_meta |> left_join(gcm_clim, by = "gcm") |> arrange(!core, ecs) |>
+  transmute(GCM = gcm, Centre = centre, `ECS (K)` = fmt(ecs, 1), Core = ifelse(core, "✓", ""), v2 = ifelse(v2, "✓", ""),
+            `ΔT (°C), SSP2-4.5 2041–60` = fmt(d_bio1_a, 1), `ΔP (%), SSP2-4.5 2041–60` = fmt(d_bio12_pct_a, 0),
+            `ΔT (°C), SSP5-8.5 2081–2100` = fmt(d_bio1_b, 1), `ΔP (%), SSP5-8.5 2081–2100` = fmt(d_bio12_pct_b, 0),
+            `Δ aridity, SSP5-8.5 2081–2100` = fmt(d_aridity_b, 1)) |>
+  kable(align = "llrccrrrrr")
+```
+:::
+
+::: {.primary-figure}
+```{r}
+#| label: fig-climate
+#| fig-cap: "Projected change in the two dominant predictors across the currently suitable range of *H. longicornis* in Australia and New Zealand (area-weighted means relative to 1970–2000). Each point is one GCM × SSP combination; panels are 20-year periods. The Thornthwaite aridity index ranges from 0 (no water deficit) to 100."
+#| fig-width: 12
+#| fig-height: 4.5
+clim_core <- filter(clim_all, set == "core", domain == "Current suitable range")
+ggplot(clim_core, aes(d_bio1, d_aridity, colour = ssp_l)) +
+  geom_hline(yintercept = 0, colour = "grey70") +
+  geom_point(size = 1.8, alpha = 0.85) +
+  scale_colour_manual(values = ssp_col, name = NULL) +
+  facet_wrap(~ period, nrow = 1) +
+  labs(x = "Change in annual mean temperature (°C)", y = "Change in aridity index") +
+  theme(legend.position = "bottom")
+save_fig("Fig1_projected_climate_change", w = 12, h = 4.5)
+```
+:::
+
+## Future suitability and range change
+
+Projected change is dominated by contraction of suitable climate at the warm and dry margins of the
+Australian range; gains elsewhere are small (@fig-future-suit, @fig-change, @tbl-change). Combining
+both countries, suitable area changes by `r pc("Australia + New Zealand", "245", "2041-2060")` by
+2041–2060 under SSP2-4.5. By 2081–2100 the change is `r pcm("Australia + New Zealand", "126", "2081-2100")`%
+under SSP1-2.6, `r pcm("Australia + New Zealand", "245", "2081-2100")`% under SSP2-4.5,
+`r pcm("Australia + New Zealand", "370", "2081-2100")`% under SSP3-7.0 and
+`r pcm("Australia + New Zealand", "585", "2081-2100")`% under SSP5-8.5. Almost all of the change occurs in
+Australia, where suitable area changes by `r pc("Australia", "245", "2041-2060")` by 2041–2060 under
+SSP2-4.5 and by `r pc("Australia", "370", "2081-2100")` by 2081–2100 under SSP3-7.0 (SSP5-8.5:
+`r pcm("Australia", "585", "2081-2100")`%). In New Zealand, suitable area is essentially unchanged
+(`r pcm("New Zealand", "126", "2081-2100")` to `r pcm("New Zealand", "370", "2081-2100")`% by 2081–2100). Climate
+there remains within the species' optimum, and modest warming slightly expands suitable climate into
+the lower margins of the Southern Alps. Total gains are small in every scenario
+(≤ `r fmt(max(ex$gain_med) / 1000, 0)` × 10³ km²) compared with losses of up to
+`r fmt(max(ex$loss_med) / 1000, 0)` × 10³ km².
+
+Losses are concentrated where the tick's range already approaches its thermal and moisture limits
+(@fig-change, @tbl-jur): coastal and subcoastal Queensland, the northern rivers and western slopes
+of New South Wales, inland and western Victoria, south-eastern South Australia and south-western
+Western Australia. Queensland and Western Australia lose most of their suitable area: Queensland
+`r sgn(es("Queensland", "245", "2041-2060")$pct_change_med)`% by 2041–2060 under SSP2-4.5 and
+`r sgn(es("Queensland", "370", "2081-2100")$pct_change_med)`% by 2081–2100 under SSP3-7.0; Western Australia
+`r sgn(es("Western Australia", "245", "2041-2060")$pct_change_med)`% and
+`r sgn(es("Western Australia", "370", "2081-2100")$pct_change_med)`%, respectively. New South Wales, which has
+the largest suitable area, changes by `r sgn(es("New South Wales", "245", "2041-2060")$pct_change_med)`% by
+2041–2060 under SSP2-4.5 and `r sgn(es("New South Wales", "370", "2081-2100")$pct_change_med)`% by 2081–2100
+under SSP3-7.0, and Victoria by `r sgn(es("Victoria", "245", "2041-2060")$pct_change_med)`% and
+`r sgn(es("Victoria", "370", "2081-2100")$pct_change_med)`%. Tasmania (`r sgn(es("Tasmania", "370", "2081-2100")$pct_change_med)`%
+by 2081–2100 under SSP3-7.0) and both islands of New Zealand are almost entirely stable. As a result,
+the suitable area in Australia contracts towards the south-east and to higher ground: by 2081–2100 its
+area-weighted centroid moves `r fmt(abs(au_lat("245")), 1)`° (SSP2-4.5) to `r fmt(abs(au_lat("585")), 1)`°
+(SSP5-8.5) poleward, and its mean elevation rises by `r fmt(au_el("245"), 0)`–`r fmt(au_el("585"), 0)` m
+(@suppfig-shift). Individual GCMs agree on the spatial pattern of losses and differ mainly in their
+extent (@suppfig-pergcm).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-future-suit
+#| fig-cap: "Ensemble-median climatic suitability (cloglog) for *H. longicornis* across ten GCMs for each emissions scenario (columns) in 2041–2060 and 2081–2100 (rows). Current suitability is shown in Figure 3 of the current-climate report (`code_3`); 2021–2040 and 2061–2080 are in @suppfig-otherperiods."
+#| fig-width: 13
+#| fig-height: 6.4
+k_main <- names(ens_maps)[grepl("2041-2060|2081-2100", names(ens_maps))]
+d_med <- map_df(setNames(lapply(ens_maps[k_main], `[[`, "med"), k_main), key_lab(k_main))
+d_cur <- as.data.frame(aggregate(cur_suit, 2, mean, na.rm = TRUE), xy = TRUE, na.rm = TRUE)
+ggplot(d_med) + geom_raster(aes(x, y, fill = value)) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "magma", direction = -1, limits = c(0, 1), name = "Suitability") +
+  facet_grid(period ~ ssp_l) + map_base
+save_fig("Fig2_future_suitability", w = 13, h = 6.4)
+```
+:::
+
+::: {.primary-figure}
+```{r}
+#| label: fig-change
+#| fig-cap: "Projected change in climatically suitable area relative to current climate (10th-percentile training-presence threshold). Stable, loss and gain classes use the majority of the ten GCMs; *robust* indicates agreement of at least 80% of GCMs (for losses, at most 20% of GCMs projecting continued suitability)."
+#| fig-width: 13
+#| fig-height: 6.4
+chg_lab <- c("Unsuitable", "Loss (robust)", "Loss (majority)", "Stable (robust)", "Stable (majority)", "Gain (majority)", "Gain (robust)")
+chg_col <- setNames(c("grey90", "#b2182b", "#f4a582", "#2166ac", "#92c5de", "#a6dba0", "#1b7837"), chg_lab)
+chg7 <- function(e) { f <- e$agree
+  ifelse(bin_cur, ifelse(f >= 0.8, 4L, ifelse(f >= 0.5, 5L, ifelse(f <= 0.2, 2L, 3L))),
+                  ifelse(f >= 0.8, 7L, ifelse(f >= 0.5, 6L, 1L))) }
+d_chg <- map_df(setNames(lapply(ens_maps[k_main], chg7), k_main), key_lab(k_main), fun = "modal") |>
+  mutate(cls = factor(chg_lab[value], levels = chg_lab))
+ggplot(d_chg) + geom_raster(aes(x, y, fill = cls)) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_manual(values = chg_col, name = NULL, drop = FALSE) +
+  facet_grid(period ~ ssp_l) + map_base + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 1))
+save_fig("Fig3_range_change", w = 13, h = 6.4)
+```
+:::
+
+::: {.primary-table}
+```{r}
+#| label: tbl-change
+#| tbl-cap: !expr paste0("Projected climatically suitable area and its change relative to current climate (median and range across ten GCMs). Gains and losses are areas becoming suitable or unsuitable. *Known localities* is the percentage of grid cells with a known Oceanian record that remain suitable (currently ", fmt(100 * known_cur, 0), "%).")
+k3 <- function(x) fmt(x / 1000, 0)
+cur_rows <- summ_cur |> filter(unit %in% c("Australia", "New Zealand", "Australia + New Zealand")) |>
+  transmute(unit, Scenario = "Current (1970–2000)", Period = "", `Suitable (10³ km²)` = k3(suitable_cur),
+            `Change (%)` = "", `Gain (10³ km²)` = "", `Loss (10³ km²)` = "", `Known localities (%)` = ifelse(unit == "Australia + New Zealand", fmt(100 * known_cur, 0), ""))
+fut_rows <- ens_summ |> filter(unit %in% c("Australia", "New Zealand", "Australia + New Zealand"), period %in% c("2041-2060", "2081-2100")) |>
+  transmute(unit, Scenario = as.character(ssp_l), Period = gsub("-", "–", period),
+            `Suitable (10³ km²)` = sprintf("%s [%s, %s]", k3(suitable_med), k3(suitable_lo), k3(suitable_hi)),
+            `Change (%)` = fmt_rng(pct_change_med, pct_change_lo, pct_change_hi),
+            `Gain (10³ km²)` = sprintf("%s [%s, %s]", k3(gain_med), k3(gain_lo), k3(gain_hi)),
+            `Loss (10³ km²)` = sprintf("%s [%s, %s]", k3(loss_med), k3(loss_lo), k3(loss_hi)),
+            `Known localities (%)` = ifelse(unit == "Australia + New Zealand",
+                                            fmt_rng(100 * known_suitable_med, 100 * known_suitable_lo, 100 * known_suitable_hi), ""))
+bind_rows(cur_rows, fut_rows) |>
+  mutate(unit = factor(unit, levels = c("Australia", "New Zealand", "Australia + New Zealand"))) |>
+  arrange(unit, Period != "", Period, Scenario) |>
+  rename(Region = unit) |> kable(align = "lllrrrrr")
+```
+:::
+
+::: {.primary-table}
+```{r}
+#| label: tbl-jur
+#| tbl-cap: "Climatically suitable area (10³ km²) by jurisdiction now and in three scenarios: median across ten GCMs, with the median percentage change and its range across GCMs in parentheses."
+jur_tab <- ens_summ |> filter(unit %in% jur_keep, (ssp == "245" & period %in% c("2041-2060", "2081-2100")) | (ssp == "370" & period == "2081-2100")) |>
+  mutate(col = paste(ssp_l, gsub("-", "–", period)),
+         val = ifelse(is.finite(pct_change_med), sprintf("%s (%s%% [%s, %s])", fmt(suitable_med / 1000, 1),
+                      sprintf("%+.0f", pct_change_med), sprintf("%+.0f", pct_change_lo), sprintf("%+.0f", pct_change_hi)),
+                      sprintf("%s", fmt(suitable_med / 1000, 1)))) |>
+  dplyr::select(unit, col, val) |> pivot_wider(names_from = col, values_from = val)
+summ_cur |> filter(unit %in% jur_keep) |> transmute(unit, Current = fmt(suitable_cur / 1000, 1), cur = suitable_cur) |>
+  left_join(jur_tab, by = "unit") |> arrange(desc(cur)) |> dplyr::select(-cur) |> rename(Jurisdiction = unit) |>
+  kable(align = "lrrrr")
+```
+:::
+
+## Trajectories and the fate of known localities
+
+Losses in Australia accumulate steadily (@fig-trajectory a). A large part of the projected
+contraction has already occurred by 2021–2040 (`r pcm("Australia", "245", "2021-2040")`% under SSP2-4.5),
+when the four SSPs are still indistinguishable. The scenarios diverge after mid-century: under
+SSP1-2.6 losses stabilise at about `r mns(-es("Australia", "126", "2081-2100")$pct_change_med)`%, whereas under SSP3-7.0 and
+SSP5-8.5 they continue to grow to the end of the century. Of the grid cells with known records of
+the tick in Australia and New Zealand, `r fmt(100 * known_cur, 0)`% are climatically suitable under
+the 1970–2000 baseline. This falls to `r kn("245", "2041-2060")`% by 2041–2060 under SSP2-4.5 and to
+`r kn("126", "2081-2100")`%, `r kn("245", "2081-2100")`%, `r kn("370", "2081-2100")`% and `r kn("585", "2081-2100")`%
+by 2081–2100 under SSP1-2.6, SSP2-4.5, SSP3-7.0 and SSP5-8.5 (@fig-trajectory b). The localities
+that become unsuitable are mostly in south-east Queensland and northern New South Wales.
+
+::: {.primary-figure}
+```{r}
+#| label: fig-trajectory
+#| fig-cap: "(a) Change in climatically suitable area through the century relative to 1970–2000, for Australia and New Zealand separately. Lines are medians across ten GCMs; ribbons span the GCM range. (b) Percentage of grid cells with known Oceanian records of *H. longicornis* that remain climatically suitable."
+#| fig-width: 13
+#| fig-height: 4.8
+traj <- core |> filter(unit %in% c("Australia", "New Zealand")) |>
+  group_by(unit, ssp_l, period) |>
+  summarise(med = median(pct_change), lo = min(pct_change), hi = max(pct_change),
+            q1 = quantile(pct_change, 0.25), q3 = quantile(pct_change, 0.75), .groups = "drop") |>
+  mutate(year = per_mid[as.character(period)])
+traj0 <- bind_rows(traj, expand_grid(unit = c("Australia", "New Zealand"), ssp_l = factor(ssp_lab, levels = ssp_lab)) |>
+  mutate(med = 0, lo = 0, hi = 0, q1 = 0, q3 = 0, year = 1985))
+p_tr <- ggplot(traj0, aes(year, med, colour = ssp_l, fill = ssp_l)) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) + geom_point(size = 1.4) +
+  scale_colour_manual(values = ssp_col, name = NULL) + scale_fill_manual(values = ssp_col, name = NULL) +
+  facet_wrap(~ unit, scales = "free_y") +
+  scale_x_continuous(breaks = c(1985, per_mid), labels = c("1970–\n2000", gsub("-", "–\n", periods))) +
+  labs(x = NULL, y = "Change in suitable area (%)", tag = "a") + theme(legend.position = "bottom")
+kn <- core |> filter(unit == "Australia + New Zealand") |> group_by(ssp_l, period) |>
+  summarise(med = 100 * median(known_suitable), lo = 100 * min(known_suitable), hi = 100 * max(known_suitable), .groups = "drop") |>
+  mutate(year = per_mid[as.character(period)]) |>
+  bind_rows(tibble(ssp_l = factor(ssp_lab, levels = ssp_lab), med = 100 * known_cur, lo = 100 * known_cur, hi = 100 * known_cur, year = 1985))
+p_kn <- ggplot(kn, aes(year, med, colour = ssp_l, fill = ssp_l)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.12, colour = NA) + geom_line(linewidth = 0.9) + geom_point(size = 1.4) +
+  scale_colour_manual(values = ssp_col, guide = "none") + scale_fill_manual(values = ssp_col, guide = "none") +
+  scale_x_continuous(breaks = c(1985, per_mid), labels = c("1970–\n2000", gsub("-", "–\n", periods))) +
+  labs(x = NULL, y = "Known localities climatically suitable (%)", tag = "b")
+p_tr + p_kn + plot_layout(widths = c(2, 1))
+save_fig("Fig4_trajectories", w = 13, h = 4.8)
+```
+:::
+
+## Climatic drivers of change
+
+Warming is the main driver of projected losses (@fig-drivers). In Australia, changing only the
+temperature predictors reduced suitable area by `r mns(-at("245", "2041-2060", "t"))`% by 2041–2060 under
+SSP2-4.5 and by `r mns(-at("370", "2081-2100", "t"))`% by 2081–2100 under SSP3-7.0. Changing only the moisture
+predictors reduced it by `r mns(-at("245", "2041-2060", "m"))`% and `r mns(-at("370", "2081-2100", "m"))`%,
+respectively, against combined losses of `r mns(-at("245", "2041-2060", "c"))`% and
+`r mns(-at("370", "2081-2100", "c"))`%. Most of the moisture effect comes from the aridity index
+(@supptbl-drivers), which itself increases mainly because warming raises evaporative demand.
+Precipitation variables alone have little effect. Warming acting alone would remove
+`r fmt(dl("370_2081-2100", "bio1"), 0)` × 10³ km² of currently suitable climate by 2081–2100 under
+SSP3-7.0, increased aridity alone `r fmt(dl("370_2081-2100", "aridity_idx"), 0)` × 10³ km² and the change in
+diurnal range alone `r fmt(dl("370_2081-2100", "bio2"), 0)` × 10³ km². Rising annual mean temperature is
+the dominant driver of loss along the Queensland and New South Wales coast and ranges. Increasing
+aridity and diurnal range dominate along the southern margin of the range in Victoria, South
+Australia, south-western Western Australia and parts of the Tasmanian midlands (@fig-drivers b,
+@suppfig-drivervars). In New Zealand, warming alone slightly increases suitable area and drying
+slightly reduces it.
+
+::: {.primary-figure}
+```{r}
+#| label: fig-drivers
+#| fig-cap: "Climatic drivers of projected change. (a) Change in suitable area when only the temperature predictors (BIO1, BIO2), only the moisture predictors (BIO12, BIO13, BIO15, BIO17, aridity) or all predictors are changed to future values (bars: median across GCMs; whiskers: range). (b) Dominant driver in cells projected to be lost or gained (the predictor whose individual change most decreases or increases suitability; ensemble median) for SSP2-4.5 2041–2060 and SSP3-7.0 2081–2100. Losses are coloured by their dominant driver; the few gained cells are shown in green."
+#| fig-width: 13
+#| fig-height: 9
+att <- core |> filter(unit %in% c("Australia", "New Zealand"), period %in% c("2041-2060", "2081-2100")) |>
+  transmute(unit, ssp_l, period, gcm, `Temperature only` = 100 * (suitable_temp_only - suitable_cur) / suitable_cur,
+            `Moisture only` = 100 * (suitable_moist_only - suitable_cur) / suitable_cur, `Combined` = pct_change) |>
+  pivot_longer(c(`Temperature only`, `Moisture only`, Combined), names_to = "driver") |>
+  mutate(driver = factor(driver, levels = c("Temperature only", "Moisture only", "Combined"))) |>
+  group_by(unit, ssp_l, period, driver) |> summarise(med = median(value), lo = min(value), hi = max(value), .groups = "drop")
+p_att <- ggplot(att, aes(ssp_l, med, fill = driver)) +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_col(position = position_dodge(0.8), width = 0.75) +
+  geom_errorbar(aes(ymin = lo, ymax = hi), position = position_dodge(0.8), width = 0.25, linewidth = 0.3) +
+  scale_fill_manual(values = c("Temperature only" = "#d6604d", "Moisture only" = "#4393c3", Combined = "grey35"), name = NULL) +
+  facet_grid(unit ~ period, scales = "free_y") + labs(x = NULL, y = "Change in suitable area (%)", tag = "a") +
+  theme(legend.position = "bottom")
+drv_col <- setNames(c("#e41a1c", "#ff7f00", "#4daf4a", "#a6d854", "#377eb8", "#984ea3", "#a65628"), var_lab[sel_vars])
+drv_loss <- function(k) { d <- dom_driver(k); cl <- chg_class(ens_maps[[k]]); ifelse(cl == 3, 99L, ifelse(cl == 1, d, NA_integer_)) }
+d_drv <- map_df(setNames(lapply(focal, drv_loss), focal), key_lab(focal), fun = "modal") |>
+  mutate(drv = factor(ifelse(value == 99, "Gain (any driver)", paste("Loss:", var_lab[sel_vars][pmin(value, 7)])),
+                      levels = c(paste("Loss:", var_lab[sel_vars]), "Gain (any driver)")),
+         panel = paste(ssp_l, period))
+p_dm <- ggplot(d_drv) +
+  geom_sf(data = aunz_sf, fill = "grey92", colour = NA) +
+  geom_raster(aes(x, y, fill = drv)) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_manual(values = c(setNames(drv_col, paste("Loss:", names(drv_col))), "Gain (any driver)" = "#1b7837"),
+                    name = NULL, drop = TRUE) +
+  facet_wrap(~ panel) + map_base + labs(tag = "b") + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 2))
+p_att / p_dm + plot_layout(heights = c(1, 1.15))
+save_fig("Fig5_drivers", w = 13, h = 9)
+```
+:::
+
+## Extrapolation and sources of uncertainty
+
+Future climates outside the calibration range are extensive but confined to areas that are
+unsuitable in any case. Univariate novelty (MESS < 0), driven almost entirely by annual mean
+temperature exceeding the warmest calibration conditions, covers
+`r fmt(100 * min(ex$novel_univariate_med) / sum(area_km2), 0)`–`r fmt(100 * max(ex$novel_univariate_med) / sum(area_km2), 0)`%
+of the two countries' land, all of it in tropical and arid northern Australia (@suppfig-novelty,
+@supptbl-extrap). No cells had novel combinations of individually analogue values (NT2 > 1), and
+≥ `r fmt(100 * min(ex$suitable_analogue_med / ex$suitable_med), 1)`% of projected suitable area lies in
+analogue climate in every scenario. Clamping changed suitability by more than 0.05 only in the hot
+north, where suitability is far below the threshold. Projected range change therefore does not
+depend on extrapolation.
+
+The relative importance of uncertainty sources changes through the century (@fig-uncert a,
+@supptbl-vp). For Australia, the GCM accounts for most of the variance in projected change until
+mid-century (`r fmt(vpv("Australia", "2041-2060", "Climate model (GCM)"), 0)`% in 2041–2060), while the
+emissions scenario accounts for only `r fmt(vpv("Australia", "2041-2060", "Emissions scenario (SSP)"), 0)`%.
+By 2081–2100 the emissions scenario is the largest source
+(`r fmt(vpv("Australia", "2081-2100", "Emissions scenario (SSP)"), 0)`%), followed by the GCM
+(`r fmt(vpv("Australia", "2081-2100", "Climate model (GCM)"), 0)`%). Uncertainty in the SDM itself
+contributes `r fmt(vpv("Australia", "2081-2100", "SDM parameters (bootstrap)"), 0)`–`r fmt(vpv("Australia", "2041-2060", "SDM parameters (bootstrap)"), 0)`%.
+In New Zealand, where projected change is close to zero, the small remaining variance is mostly SDM
+uncertainty. Spatially, GCM uncertainty is highest along the coast and ranges of south-east
+Queensland and northern New South Wales, where the projected losses occur. SDM uncertainty is
+lower and more evenly spread (@fig-uncert b, @suppfig-sdmgcm). Excluding the GCMs with ECS above
+4 K changed projected losses by at most two percentage points (@suppfig-sens), and the MSS threshold
+gave slightly smaller losses than the 10th-percentile threshold
+(SSP2-4.5 2081–2100: `r sgn(filter(thr_cmp, ssp_l == "SSP2-4.5", period == "2081-2100")$med)`% vs.
+`r sgn(sc("Core ensemble (10 GCMs)", "245", "2081-2100"))`%).
+
+::: {.primary-figure}
+```{r}
+#| label: fig-uncert
+#| fig-cap: "Sources of uncertainty in projections. (a) Partitioning of the variance in projected percentage change in suitable area among emissions scenario, GCM, SDM bootstrap replicate and their interactions (4 SSPs × 10 GCMs × 30 replicates per period). (b) Standard deviation of projected suitability among GCMs (final consensus) and among SDM bootstrap replicates (averaged over GCMs), SSP3-7.0 2081–2100."
+#| fig-width: 13
+#| fig-height: 5.5
+p_vp <- vp |> filter(unit != "Australia + New Zealand") |>
+  mutate(component = factor(component, levels = rev(c("Emissions scenario (SSP)", "Climate model (GCM)", "SDM parameters (bootstrap)", "Interactions")))) |>
+  ggplot(aes(period, 100 * frac, fill = component)) + geom_col(width = 0.7) +
+  scale_fill_manual(values = c("Emissions scenario (SSP)" = "#E71D25", "Climate model (GCM)" = "#4393c3",
+                               "SDM parameters (bootstrap)" = "#5aae61", "Interactions" = "grey75"), name = NULL) +
+  facet_wrap(~ unit, ncol = 1) + scale_x_discrete(labels = function(x) gsub("-", "–", x)) +
+  labs(x = NULL, y = "Variance in projected change (%)", tag = "a") + theme(legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 2, reverse = TRUE))
+k_u <- "370_2081-2100"
+d_unc <- bind_rows(
+  as.data.frame(aggregate(to_rast(ens_maps[[k_u]]$sd), 2, mean, na.rm = TRUE), xy = TRUE, na.rm = TRUE) |> mutate(src = "Among climate models (GCM SD)"),
+  as.data.frame(aggregate(to_rast(sdm_sd[[k_u]]), 2, mean, na.rm = TRUE), xy = TRUE, na.rm = TRUE) |> mutate(src = "Among SDM bootstrap replicates (SD)"))
+p_unc <- ggplot(d_unc) + geom_raster(aes(x, y, fill = value)) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "viridis", name = "SD of\nsuitability", limits = c(0, NA)) +
+  facet_wrap(~ src) + map_base + labs(tag = "b")
+p_vp + p_unc + plot_layout(widths = c(1, 2.4))
+save_fig("Fig6_uncertainty", w = 13, h = 5.5)
+```
+:::
+
+::: {.primary-figure}
+```{r}
+#| label: fig-surv
+#| fig-cap: "Management categories derived from current suitability and GCM agreement for a mid-century moderate-emissions scenario (SSP2-4.5 2041–2060) and an end-of-century high-emissions scenario (SSP3-7.0 2081–2100). *Persistent*: suitable now and in ≥ 80% of GCMs; *at risk*: suitable now and in 20–80%; *likely loss*: suitable now and in ≤ 20%; *emerging (robust)*: unsuitable now, suitable in ≥ 80%; *emerging (possible)*: 50–80%. Black points are known records; lines are state/territory and NZ island boundaries."
+#| fig-width: 13
+#| fig-height: 6.5
+mg_lab <- c("Unsuitable", "Emerging (possible)", "Emerging (robust)", "Persistent (robust)", "At risk (uncertain)", "Likely loss")
+mg_col <- setNames(c("grey90", "#c2a5cf", "#762a83", "#1b7837", "#fdb863", "#d73027"), mg_lab)
+mgmt <- function(e) { f <- e$agree
+  ifelse(bin_cur, ifelse(f >= 0.8, 4L, ifelse(f <= 0.2, 6L, 5L)), ifelse(f >= 0.8, 3L, ifelse(f >= 0.5, 2L, 1L))) }
+d_mg <- map_df(setNames(lapply(ens_maps[focal], mgmt), focal), key_lab(focal), fun = "modal") |>
+  mutate(cls = factor(mg_lab[value], levels = mg_lab), panel = paste(ssp_l, period))
+ggplot(d_mg) + geom_raster(aes(x, y, fill = cls)) +
+  geom_sf(data = jur, fill = NA, colour = "grey45", linewidth = 0.1) +
+  geom_point(data = known_pts, aes(lon, lat), size = 0.35, colour = "black") +
+  scale_fill_manual(values = mg_col, name = NULL, drop = FALSE) +
+  facet_wrap(~ panel) + map_base + theme(legend.position = "bottom") + guides(fill = guide_legend(nrow = 1))
+mg_area <- map_dfr(focal, function(k) { m <- mgmt(ens_maps[[k]])
+  tibble(scenario = k, class = mg_lab[m], unit = country_c, area = area_km2, far = dist_known > 100) |>
+    group_by(scenario, unit, class) |> summarise(area = sum(area), area_far = sum(area[far %in% TRUE]), .groups = "drop") })
+save_fig("Fig7_management_categories", w = 13, h = 6.5)
+```
+:::
+
+## Implications for surveillance and management
+
+Under SSP2-4.5 in 2041–2060, `r fmt(mg("245_2041-2060", "Australia", "Persistent (robust)"), 0)` × 10³ km²
+of the current Australian range is classified as persistent (≥ 80% of GCMs),
+`r fmt(mg("245_2041-2060", "Australia", "At risk (uncertain)"), 0)` × 10³ km² as at risk and
+`r fmt(mg("245_2041-2060", "Australia", "Likely loss"), 0)` × 10³ km² as likely to be lost (@fig-surv,
+@supptbl-mgmt). By 2081–2100 under SSP3-7.0, the persistent core shrinks to
+`r fmt(mg("370_2081-2100", "Australia", "Persistent (robust)"), 0)` × 10³ km², and
+`r fmt(mg("370_2081-2100", "Australia", "Likely loss"), 0)` × 10³ km² is likely to be lost. The persistent
+core comprises coastal and highland New South Wales south of about 30°S, eastern and southern
+Victoria, Tasmania and the whole of New Zealand. Robust emerging areas are very small
+(`r fmt(mg("245_2041-2060", "Australia", "Emerging (robust)") + mg("245_2041-2060", "New Zealand", "Emerging (robust)"), 1)`
+× 10³ km² under SSP2-4.5 2041–2060), and they lie mainly at the margins of the unsuitable
+high-altitude core of the South Island. Climate change is therefore not projected to open
+substantial new areas to *H. longicornis* in either country. The surveillance gaps identified for
+current climate (`code_3`: Tasmania, the South Island and western Victoria) remain climatically
+suitable in all scenarios, except western Victoria, which is at risk under higher emissions.
+
+# Discussion
+
+Projected with a model that demonstrably transfers between continents and with physically
+consistent future predictors, climate change reduces the area climatically suitable for
+*H. longicornis* in Australia and leaves New Zealand almost unchanged. The Australian range
+contracts from its warm, dry margins in Queensland, inland New South Wales and Victoria, South
+Australia and Western Australia towards a persistent core in south-eastern New South Wales, eastern
+Victoria and Tasmania. The contraction is driven mainly by warming, and it scales with emissions in
+the second half of the century. Gains are negligible in both countries. Previous projections reached
+a qualitatively similar conclusion, but for largely artefactual reasons and with a much larger
+apparent baseline range.
+
+## Why the corrected projections differ from the previous analysis
+
+The previous analysis reported contractions of 19–45%, similar in magnitude to those reported here
+for Australia. The agreement is coincidental. The v2 model did not transfer between regions, and
+its projected losses were driven by impossible aridity values and by a VPD approximation, not by
+the temperature responses that govern tick development and survival. Its baseline range of
+`r fmt(v2_cur_area / 1e6, 2)` million km² was `r fmt(v2_cur_area / area_true, 1)` times larger than that of the
+validated model. It also included large areas of inland Australia where the tick does not occur and
+which therefore could not be "lost". Its extrapolation was mostly produced by the aridity artefact,
+and its ensemble was weighted towards high-sensitivity GCMs. The present projections remove each of
+these problems: every predictor is computed from GCM output in the same way as the training data;
+projected suitable area lies almost entirely within analogue climate; the GCM ensemble is screened
+for climate sensitivity and model dependence; and the contributions of scenario, GCM and SDM to
+uncertainty are quantified. The general lesson is that future projections are only as reliable as
+the weakest derived predictor. Ad hoc scaling of derived indices is a common shortcut in SDM studies,
+but it can move predictors outside their physical range without any visible warning.
+
+## Mechanisms: heat and evaporative demand at the warm margin
+
+The contraction follows directly from the fitted niche. Suitability in the consensus model is
+unimodal in annual mean temperature, with an optimum of about 12–15 °C, and declines with aridity
+and diurnal range (`code_3`). Much of the northern part of the current Australian range, in south-east
+Queensland and northern New South Wales, already lies on the warm side of the optimum, so warming of
+1–4 °C pushes it over the edge of suitable climate. Increasing evaporative demand reduces suitability
+along the southern and inland margins, where moisture limits the range today. This is consistent
+with the physiology of ixodid ticks: higher temperatures increase water loss and metabolic
+costs of non-feeding stages, and desiccation during questing is a principal cause of mortality
+[@needham1991; @ogden2016]. In the native range, *H. longicornis* is likewise absent from the
+lowland subtropics of southern China, and in the cooler parts of its range it is limited by winter
+cold. New Zealand and Tasmania lie in the cool, humid part of the niche, so warming moves them
+towards rather than away from the optimum, while the small increases in aridity there are not yet
+limiting.
+
+The contraction is not an artefact of extrapolation. All of the projected losses occur in climates
+within the calibration range, which spans the native range in eastern and southern China and the
+south-eastern United States, the latter including climates warmer than coastal Queensland. Novel
+climates occur only in the tropical and arid north, where the tick is absent and suitability is
+far below the threshold. Clamping, which affects only those areas, cannot alter the conclusions.
+
+## How much has already changed
+
+Because the model was trained on 1970–2000 climate, part of the projected contraction, about a
+tenth of the Australian range by 2021–2040, represents change that has probably already happened.
+This has two practical implications. First, records from the 1970s–1990s at the northern margin of the
+range in Queensland may describe populations that are now climatically marginal, and current tick
+burdens there may already be lower than historical records suggest. Second, the hindcast offers a
+test of the model: if surveillance in the margins finds declining tick abundance or prevalence of
+*T. orientalis* infection since the 1990s, this would support the projections.
+
+## Uncertainty and what would reduce it
+
+For decisions over the next few decades, the main uncertainty is which GCM best represents the
+regional climate, not the emissions pathway. The pathways diverge only after mid-century, when they
+become the dominant source of uncertainty. SDM uncertainty contributes a moderate and fairly
+constant share. This pattern means that improving the representation of regional climate, for example
+by weighting GCMs by their skill over eastern Australia [@knutti2017; @grose2020] or by using
+regionally downscaled projections, would narrow near-term projections more than refining the SDM.
+For the end of the century, the projections are better framed as conditional on emissions: in
+Australia, roughly a fifth of the suitable area is lost under strong mitigation and almost half under
+very high emissions.
+
+## Implications for biosecurity and livestock industries
+
+Three messages follow for management. First, the core of the tick's range, which carries most of the
+affected dairy and beef cattle in south-eastern Australia and almost all of New Zealand's pastoral
+land, remains climatically suitable under every scenario. *H. longicornis* and *T. orientalis* will
+remain a long-term problem there, and control programmes should be planned on that basis. Second,
+the northern and inland margins of the Australian range are likely to become less suitable,
+starting now. Investment in long-term tick control infrastructure in those areas should account for
+declining climatic suitability. Monitoring there would also show whether the tick is retreating as
+projected. Third, climate change is not projected to open new areas, so the surveillance priorities
+identified under current climate, mainly Tasmania, the South Island of New Zealand and western
+Victoria, remain the priorities. Their importance rests on introduction risk through stock movement,
+not on climatic expansion.
+
+## Limitations
+
+The projections inherit the limitations of the current-climate model: they describe climatic
+suitability at about 5 km resolution and ignore microclimate, vegetation, irrigation and host
+density, all of which can sustain populations in marginal regional climates. Irrigated pasture and
+riparian refugia within the *likely loss* areas may allow the tick to persist locally. The model
+assumes that the climatic niche will be conserved and that populations cannot adapt to warmer
+conditions within the projection horizon. The niche analysis in `code_3` supports conservatism across
+the invasion, but it cannot rule out adaptation. Projections are equilibrium suitability, not
+predicted occupancy: they say nothing about the rate at which populations decline at the margins.
+Future predictors are WorldClim delta-downscaled CMIP6 monthly climatologies, which represent
+changes in mean climate only, not changes in variability or extremes such as heatwaves and droughts,
+which may matter more for tick survival. Finally, the aridity index uses the temperature-based
+Hargreaves equation for PET, which may overestimate increases in evaporative demand under warming
+compared with physically based formulations. This would make the projected moisture-driven losses
+conservative upper bounds.
+
+## Conclusions
+
+Corrected and re-run with a transfer-validated model, the projections show that climate change will
+contract the range of *H. longicornis* in Australia from its warm and dry margins, by about a tenth
+already and by a fifth to almost a half by the end of the century depending on emissions. The core
+range in south-eastern Australia, Tasmania and New Zealand will remain suitable. Warming is the main
+driver; projected losses lie entirely within analogue climates; and the GCM is the main source of
+uncertainty until mid-century. The previous projections reached superficially similar numbers through
+a model that did not transfer and through physically impossible future predictors, and they should
+be replaced by those presented here.
+
+# Extending the analysis to increase its practical impact
+
+The projections answer the question "where will climate permit *H. longicornis* to persist?". Managers
+and industry need answers to "where, when and with what consequences will the tick and its
+pathogens affect animals and people, and where should we act?". The extensions below are ordered
+roughly by the ratio of impact to effort. Several reuse the outputs of this analysis directly
+(suitability, agreement and change-class rasters in `processed_data_4/`; scenario summaries in
+`outputs_4/`).
+
+**1. Convert suitability into exposure of livestock (high impact, low effort).** Overlaying current
+and projected suitability on cattle (beef and dairy) and sheep densities would translate area into
+animals at risk. Suitable sources are the Gridded Livestock of the World [@gilbert2018], ABS
+agricultural census data for Australia and AgriBase for New Zealand. Combined with
+*Theileria orientalis* Ikeda case data and published production losses, this would give projected
+economic exposure by region and scenario, the metric that industry bodies and governments use to
+prioritise investment.
+
+**2. Add introduction pressure to identify where establishment is most likely (high impact).**
+Climatic suitability is necessary but not sufficient for establishment. Livestock movement records
+(NLIS in Australia, NAIT in New Zealand) could be used to estimate the rate at which ticks are moved
+from infested areas into the *emerging* and *persistent, unrecorded* areas identified here. Wildlife
+hosts (deer, macropods, hares) and birds should be considered as well. Combining introduction pressure
+with suitability would produce establishment-risk maps for targeting movement controls,
+pre-movement treatment and surveillance, in particular for Tasmania and the South Island of
+New Zealand.
+
+**3. Move from presence to abundance and seasonality with a process-based model (high impact,
+moderate effort).** Losses and gains of suitable area do not show whether tick burdens or the timing
+of activity will change in the core range, where most animals are. A stage-structured population
+model driven by temperature-dependent development and moisture-dependent survival
+[@needham1991; @ogden2016], parameterised from laboratory and New Zealand field data, could project the
+number of generations, the length of the questing season and relative abundance under the same
+scenarios. Such a hybrid correlative-mechanistic approach [@kearney2009] would also give an
+independent check on the correlative projections in climates outside the calibration range, and it
+would support practical advice on the timing of acaricide treatment and stock management.
+
+**4. Represent the fine-scale refuges that decide persistence at range margins (moderate effort).**
+At 5-km resolution the model cannot represent irrigated pasture, riparian vegetation or cool, moist
+gullies. These are likely to sustain populations where regional climate becomes marginal, for
+example on irrigated dairy land in northern Victoria and along the inland slopes of the Great
+Dividing Range. Adding land-cover and irrigation layers, and using 1-km or regionally downscaled
+projections (NARCliM2.0 for south-eastern Australia; NIWA downscaled CMIP6 for New Zealand), would
+make the predicted *likely loss* areas more realistic, because these areas are where coarse
+climate surfaces are least representative.
+
+**5. Report results by global warming level (low effort).** Expressing projections at 1.5, 2 and 3 °C
+of global warming, rather than by SSP and period, separates the question of how much warming will
+occur from the question of what a given amount of warming does to the tick. This aligns the results
+with policy targets and national climate services, and it reduces sensitivity to which GCMs are
+included [@hausfather2022]. GCM-specific warming levels can be assigned to each GCM × SSP × period
+combination already computed here.
+
+**6. Validate the projections with independent and temporal data (moderate effort).** Hindcasting
+the documented spread of the tick in New Zealand and Australia over the twentieth century, and its
+spread in the eastern United States since 2017, would test whether the model predicts change over
+time and not just pattern in space [@yates2018]. Structured surveys in the predicted emerging and
+at-risk areas would provide true absences, which presence-only models lack.
+
+**7. Design surveillance explicitly (high impact for biosecurity agencies).** The management
+categories in @fig-surv can feed a formal surveillance design: allocating sampling effort among
+*emerging* and *persistent, unrecorded* areas to maximise the probability of early detection for a
+given budget, using sentinel herds, veterinary and abattoir submissions and citizen-science
+reports. Each new detection or confirmed absence can then update the model, so that the maps
+improve as surveillance proceeds.
+
+**8. Extend to pathogens and to the wider region.** *H. longicornis* is a competent vector of several
+pathogens of animal and human health importance [@zhao2020]. Combining tick suitability with
+pathogen-specific surveillance (*Theileria orientalis* genotypes, and screening for exotic
+bunyaviruses and rickettsiae) would give One Health risk maps. Projecting the same model to Pacific
+island countries and Papua New Guinea, which share livestock trade links and in several cases
+existing tick populations, would support regional biosecurity cooperation at little extra cost.
+
+**9. Strengthen the model itself.** Three improvements would reduce uncertainty, and the variance
+partitioning shows where reductions matter most: (i) adding further algorithms (e.g. GAM, boosted
+regression trees) to capture algorithmic uncertainty; (ii) weighting GCMs by their skill over
+Australia and New Zealand and their independence [@knutti2017]; and (iii) testing whether
+parthenogenetic and bisexual lineages differ in climatic niche, because invaded populations are
+parthenogenetic. Reporting the model with the ODMAP protocol [@zurell2020] and publishing the rasters
+through an interactive map would make the results easier for agencies to adopt.
+
+# Supplementary material {.appendix}
+
+## Supplementary tables
+
+::: {.supp-table}
+::: {#supptbl-v2}
+| # | Component | What the previous analysis (v2, `code_2` Steps 8–10) did | Why it is a problem | What this analysis does |
+|---|---|---|---|---|
+| 1 | Model projected | Projected the v2 MaxEnt model (BIO2, BIO3, BIO13, aridity, VPD; stepwise-VIF selection, no absolute temperature variable, LQH features). | The v2 model did not transfer between regions under current climate: leave-one-region-out AUC was `r fmt(v2_loro$auc[v2_loro$region == "Oceania"])` for Oceania, `r fmt(v2_loro$auc[v2_loro$region == "East_Asia"])` for East Asia and `r fmt(v2_loro$auc[v2_loro$region == "North_America"])` for North America (0.5 = random). A model that cannot transfer in space cannot be trusted to transfer in time. Warming entered only through proxies (VPD, isothermality), and the model predicted `r fmt_int(v2_cur_area)` km² currently suitable, `r fmt(v2_cur_area / area_true, 1)` times the area predicted by the validated model. | Projects the transfer-validated consensus (`code_3`), which includes annual mean temperature in every member and reproduces the Oceanian distribution when trained without Oceanian records. |
+| 2 | Future aridity, PET and CMI | Scaled current ENVIREM values by the ratio of future to current BIO1 in °C (denominator floored at 0.1 °C; absolute value taken) and by the ratio of future to current precipitation. | Ratios of Celsius temperatures have no physical meaning: the same 2 °C warming multiplies "PET" by 1.1 at 20 °C and by 21 at 0.1 °C, and sign changes are lost. The aridity index (bounded at 100) exceeded 100 in `r fmt(v2_ai_stats$pct_above_100[v2_ai_stats$id == "MPI-ESM1-2-HR_ssp245_2041-2060"], 0)`% of Australian and New Zealand land under MPI-ESM1-2-HR SSP2-4.5 2041–2060 and in `r fmt(v2_ai_stats$pct_above_100[v2_ai_stats$id == "ACCESS-CM2_ssp585_2081-2100"], 0)`% under ACCESS-CM2 SSP5-8.5 2081–2100 (maximum `r fmt(v2_ai_stats$max_v2[v2_ai_stats$id == "ACCESS-CM2_ssp585_2081-2100"], 0)`). These impossible values put most of the projection domain outside the calibration range, which accounts for much of the 60–81% extrapolation reported. | Computes aridity from each GCM's monthly temperature and precipitation with the ENVIREM formulation (Hargreaves PET), applied as an anomaly to the training layer (@suppfig-validation). |
+| 3 | Future VPD | Current CHELSA VPD × exp(0.06 ΔT). | Saturation vapour pressure scaling only; ignores changes in relative humidity, which differ among GCMs and dominate VPD change in drying regions. | VPD is not a predictor in the consensus. If needed, GCM-specific CHELSA-CMIP6 VPD should be used. |
+| 4 | Baseline consistency | Documentation states ENVIREM variables were recomputed from WorldClim 2.1; the code loads the published ENVIREM layers, which are built on an earlier WorldClim baseline. | Future change computed against one baseline was applied to layers built on another. | Change is computed between WorldClim 2.1 current and future monthly climate with an identical formulation, then added to the training layer. |
+| 5 | GCM ensemble | Five GCMs (ACCESS-CM2, CNRM-CM6-1, MIROC6, MPI-ESM1-2-HR, UKESM1-0-LL), chosen without stated criteria. | Three of the five have ECS > 4.5 K, and UKESM1-0-LL (≈ 5.3 K) lies outside the IPCC AR6 very likely range, so the ensemble is warm-biased for any SSP [@hausfather2022]. Five members give a coarse estimate of spread. | Ten GCMs selected for data completeness, ECS within 2–5 K and independence (@tbl-gcm). The v2 ensemble and a likely-ECS subset are compared as sensitivity analyses. |
+| 6 | Scenario design | SSP2-4.5 and SSP5-8.5; 2041–2060 and 2081–2100. | No near-term period (2021–2040), which is the most relevant to current planning; no low-emission pathway; SSP5-8.5 was the only high-end scenario, although it is now considered an unlikely trajectory [@hausfather2020]. | Four SSPs (1-2.6, 2-4.5, 3-7.0, 5-8.5) × four periods (2021–2040 to 2081–2100). |
+| 7 | Suitable area | Cell count × a single cell area evaluated at the mean latitude of the 8–48°S extent. | Cell area is about one-third smaller at 48°S than at 8°S. With suitable climate concentrated in the south, this overestimates suitable area (by `r fmt(100 * (area_v2_approx / area_true - 1), 0)`% for the current consensus map). | True latitude-dependent cell areas. |
+| 8 | Threshold | Maximum sensitivity + specificity threshold. | Inconsistent with the threshold used for current-climate reporting in `code_3`; change estimates depend on the threshold. | 10th-percentile training-presence threshold, as in `code_3`; MSS reported as a sensitivity analysis. |
+| 9 | Extrapolation | MESS computed and binary maps masked for MESS < 0, but range-shift statistics were computed from unmasked maps. Univariate MESS only; clamping not assessed. | Inconsistent treatment; novel combinations of individually analogue values were ignored. | MESS and ExDet NT2 for every scenario; clamped vs unclamped predictions; suitable area reported with and without novel climates. |
+| 10 | Ensemble summary | Binary map from the median of continuous suitability; GCM agreement shown for SSP5-8.5 2081–2100 only. | The area of the median map is not the median of the areas, and agreement in one scenario says nothing about the others. | Per-GCM binary maps; area statistics as median and range across GCMs; agreement and change classes for every SSP × period. |
+| 11 | Uncertainty | GCM spread only. | SDM (parameter) uncertainty, often the largest component [@buisson2010], was ignored, and uncertainty sources were not compared. | Bootstrap SDM replicates × GCMs × SSPs; ANOVA partitioning of uncertainty for every period. |
+| 12 | Interpretation | No attribution of change to climatic drivers; "priority surveillance" areas defined from SSP5-8.5 2081–2100 only. | It was unknown whether projected losses were driven by warming or by the artefactual moisture variables; surveillance priorities were based on the least policy-relevant scenario. | Temperature-only and moisture-only projections, single-variable attribution and dominant-driver maps; management categories for SSP2-4.5 2041–2060 and SSP3-7.0 2081–2100. |
+| 13 | Reproducibility | Hard-coded absolute paths that do not match the project location; MESS calculated with different functions in Steps 6 and 9. | Code does not run as written; current and future extrapolation were not strictly comparable. | Paths relative to the project; one MESS implementation, validated against `code_3`. |
+
+Problems identified in the previous future-climate analysis, their consequences, and the corrections made here.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-pergcm}
+```{r}
+core |> filter(unit == "Australia + New Zealand") |>
+  transmute(GCM = gcm, Scenario = ssp_l, period = gsub("-", "–", period), v = sprintf("%+.0f", pct_change)) |>
+  pivot_wider(names_from = period, values_from = v) |> arrange(Scenario, GCM) |> kable(align = "llrrrr")
+```
+Projected change (%) in climatically suitable area of Australia and New Zealand combined, by GCM, emissions scenario and period.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-extrap}
+```{r}
+land_tot <- sum(area_km2)
+ens_summ |> filter(unit == "Australia + New Zealand") |>
+  transmute(Scenario = ssp_l, Period = gsub("-", "–", period),
+            `Univariate novel (% land)` = fmt(100 * novel_univariate_med / land_tot, 1),
+            `Novel combination (% land)` = fmt(100 * novel_combination_med / land_tot, 1),
+            `Suitable area in analogue climate (%)` = fmt(100 * suitable_analogue_med / suitable_med, 1),
+            `Clamping changes suitability by > 0.05 (% land)` = fmt(100 * clamp_affected_med / land_tot, 1)) |>
+  arrange(Scenario, Period) |> kable(align = "llrrrr")
+```
+Extrapolation and clamping by scenario (medians across ten GCMs). Univariate novelty: MESS < 0; novel combination: MESS ≥ 0 but ExDet NT2 > 1. Under current climate, `r fmt(100 * sum(area_km2[nov_cur$cls == 2]) / sum(area_km2), 1)`% of the land area is univariate-novel and `r fmt(100 * sum(area_km2[nov_cur$cls == 1]) / sum(area_km2), 1)`% is a novel combination.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-vp}
+```{r}
+vp |> transmute(Region = unit, Period = gsub("-", "–", period), component, pct = fmt(100 * frac, 1)) |>
+  pivot_wider(names_from = component, values_from = pct) |> kable(align = "llrrrr")
+```
+Percentage of variance in projected change in suitable area attributable to each source of uncertainty, by region and period.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-drivers}
+```{r}
+drv_tab |> mutate(scenario = recode(scenario, `245_2041-2060` = "SSP2-4.5 2041–2060", `370_2081-2100` = "SSP3-7.0 2081–2100"),
+                  variable = var_lab[variable]) |>
+  transmute(Scenario = scenario, Predictor = variable, `Loss if only this predictor changes (10³ km²)` = fmt(loss_med / 1000, 1),
+            `Gain if only this predictor changes (10³ km²)` = fmt(gain_med / 1000, 1)) |> kable(align = "llrr")
+```
+Area of currently suitable climate lost, and of currently unsuitable climate gained, when a single predictor is changed to its future value with all others held at current values (median across ten GCMs). Current suitable area: `r fmt(area_true / 1000, 0)` × 10³ km².
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-sens}
+```{r}
+bind_rows(set_cmp, thr_cmp) |>
+  transmute(Ensemble = ensemble, Scenario = ssp_l, Period = gsub("-", "–", period), `GCMs` = n,
+            `Change (%), median [range]` = fmt_rng(med, lo, hi)) |>
+  pivot_wider(names_from = c(Scenario, Period), values_from = `Change (%), median [range]`, names_sep = " ") |> kable()
+```
+Sensitivity of projected change in suitable area (Australia + New Zealand) to the GCM ensemble and to the suitability threshold. All rows use the `code_3` consensus model. For comparison, the previous analysis (v2 model, v2 ensemble, MSS threshold) reported median changes of `r paste(sprintf("%+.0f%%", v2_unc$median_pct_change), collapse = ", ")` for SSP2-4.5 2041–2060, SSP2-4.5 2081–2100, SSP5-8.5 2041–2060 and SSP5-8.5 2081–2100, respectively.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-mgmt}
+```{r}
+mg_area |> mutate(scenario = recode(scenario, `245_2041-2060` = "SSP2-4.5 2041–2060", `370_2081-2100` = "SSP3-7.0 2081–2100")) |>
+  filter(class != "Unsuitable") |>
+  transmute(Scenario = scenario, Region = unit, Category = factor(class, levels = mg_lab),
+            `Area (10³ km²)` = fmt(area / 1000, 1), `of which > 100 km from known records (10³ km²)` = fmt(area_far / 1000, 1)) |>
+  arrange(Scenario, Region, Category) |> kable(align = "lllrr")
+```
+Area in each management category (@fig-surv) by country.
+:::
+:::
+
+## Supplementary figures
+
+::: {.supp-figure}
+::: {#suppfig-validation}
+```{r}
+#| fig-width: 12
+#| fig-height: 5
+set.seed(1)
+p_v1 <- ggplot(slice_sample(tibble(envirem = ai_envirem, wc21 = ai_wc21_cur), n = 40000), aes(envirem, wc21)) +
+  geom_bin2d(bins = 70) + scale_fill_viridis_c(trans = "log10", name = "Cells") + geom_abline(linetype = 2) +
+  coord_equal() + labs(x = "ENVIREM aridity index (training layer)", y = "Recomputed from WorldClim 2.1 monthly", tag = "a")
+v2_long <- v2_cmp |> pivot_longer(c(current, v2, v4), names_to = "src") |>
+  mutate(src = recode(src, current = "Current (training layer)", v2 = "Future: v2 delta-change", v4 = "Future: this study"),
+         id = recode(id, `MPI-ESM1-2-HR_ssp245_2041-2060` = "MPI-ESM1-2-HR, SSP2-4.5, 2041–2060",
+                     `ACCESS-CM2_ssp585_2081-2100` = "ACCESS-CM2, SSP5-8.5, 2081–2100"))
+p_v2 <- ggplot(v2_long, aes(value, colour = src)) + geom_density(linewidth = 0.8) +
+  geom_vline(xintercept = 100, linetype = 2) +
+  scale_colour_manual(values = c("grey40", "#d6604d", "#2166ac"), name = NULL) +
+  facet_wrap(~ id, ncol = 1) + labs(x = "Thornthwaite aridity index (Australia + New Zealand cells)", y = "Density", tag = "b") +
+  theme(legend.position = "bottom")
+p_v1 + p_v2 + plot_layout(widths = c(1, 1.3))
+save_fig("FigS1_aridity_validation_v2_artefact", w = 12, h = 5)
+```
+Derived aridity predictor. (a) Thornthwaite aridity index recomputed from WorldClim 2.1 monthly climate versus the ENVIREM layer used to train the model (r = `r fmt(ai_cor, 3)`); future change is applied as an anomaly to the ENVIREM layer. (b) Distribution of aridity across Australian and New Zealand land cells under current climate and under two future scenarios, as computed in the previous analysis (ratio-based delta change) and in this study. The dashed line marks the theoretical maximum of the index (100).
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-climmaps}
+```{r}
+#| fig-width: 13
+#| fig-height: 7
+dclim <- map_dfr(focal, function(k) {
+  xm <- drv[[k]]$x_med
+  tibble(cell = seq_along(cells), d_bio1 = xm[, "bio1"] - env_cur$bio1, d_bio2 = xm[, "bio2"] - env_cur$bio2,
+         d_bio12 = 100 * (xm[, "bio12"] / env_cur$bio12 - 1), d_arid = xm[, "aridity_idx"] - env_cur$aridity_idx, key = k)
+})
+clim_panel <- function(v, title, pal, lims = NULL) {
+  d <- map_df(setNames(lapply(focal, function(k) dclim[[v]][dclim$key == k]), focal), key_lab(focal)) |>
+    mutate(panel = paste(ssp_l, period))
+  ggplot(d) + geom_raster(aes(x, y, fill = value)) + geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+    pal + facet_wrap(~ panel, ncol = 1) + map_base + labs(title = title) + theme(legend.position = "bottom", plot.title = element_text(size = 10))
+}
+clim_panel("d_bio1", "Δ annual mean temperature (°C)", scale_fill_distiller(palette = "Reds", direction = 1, name = NULL)) +
+  clim_panel("d_bio2", "Δ mean diurnal range (°C)", scale_fill_gradient2(low = "#2166ac", high = "#b2182b", name = NULL)) +
+  clim_panel("d_bio12", "Δ annual precipitation (%)", scale_fill_gradient2(low = "#8c510a", high = "#01665e", name = NULL, limits = c(-40, 40), oob = scales::squish)) +
+  clim_panel("d_arid", "Δ aridity index", scale_fill_gradient2(low = "#01665e", high = "#8c510a", name = NULL, limits = c(-20, 20), oob = scales::squish)) +
+  plot_layout(nrow = 1)
+save_fig("FigS2_climate_change_maps", w = 13, h = 7)
+```
+Ensemble-median projected change in four predictors relative to 1970–2000 for SSP2-4.5 2041–2060 (top) and SSP3-7.0 2081–2100 (bottom).
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-otherperiods}
+```{r}
+#| fig-width: 13
+#| fig-height: 7.5
+k_oth <- names(ens_maps)[grepl("2021-2040|2061-2080", names(ens_maps))]
+ggplot(map_df(setNames(lapply(ens_maps[k_oth], `[[`, "med"), k_oth), key_lab(k_oth))) + geom_raster(aes(x, y, fill = value)) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "magma", direction = -1, limits = c(0, 1), name = "Suitability") +
+  facet_grid(period ~ ssp_l) + map_base
+save_fig("FigS3_future_suitability_other_periods", w = 13, h = 7.5)
+```
+Ensemble-median climatic suitability for 2021–2040 and 2061–2080 (complements @fig-future-suit).
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-pergcm}
+```{r}
+#| fig-width: 13
+#| fig-height: 6.5
+ids_g <- scen$id[scen$set == "core" & scen$ssp == "245" & scen$period == "2041-2060"]
+d_g <- map_df(setNames(lapply(ids_g, function(id) S[, id] / 1e4), ids_g),
+              tibble(key = ids_g, gcm = sub("_ssp.*", "", ids_g)))
+ggplot(d_g) + geom_raster(aes(x, y, fill = value >= thr_p10)) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_manual(values = c(`FALSE` = "grey88", `TRUE` = "#2166ac"), labels = c("Unsuitable", "Suitable"), name = NULL) +
+  facet_wrap(~ gcm, ncol = 5) + map_base + theme(legend.position = "bottom")
+save_fig("FigS4_per_gcm_SSP245_2041-2060", w = 13, h = 6.5)
+```
+Binary climatic suitability projected with each of the ten GCMs for SSP2-4.5 2041–2060.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-novelty}
+```{r}
+#| fig-width: 13
+#| fig-height: 7
+k_end <- names(ens_maps)[grepl("2081-2100", names(ens_maps))]
+p_nov <- ggplot(map_df(setNames(lapply(ens_maps[k_end], `[[`, "novel"), k_end), key_lab(k_end))) +
+  geom_raster(aes(x, y, fill = value)) + geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_distiller(palette = "YlOrRd", direction = 1, limits = c(0, 1), name = "Fraction of\nGCMs with\nnovel climate") +
+  facet_wrap(~ ssp_l, nrow = 1) + map_base + labs(tag = "a")
+mm <- mess_df(as.data.frame(drv[["370_2081-2100"]]$x_med))
+mod_v <- ifelse(mm$mess < 0, match(mm$mod, sel_vars), NA)
+p_mod <- ggplot(map_df(list(m = mod_v), tibble(key = "m"), fun = "modal") |> mutate(v = factor(var_lab[sel_vars][value], levels = var_lab[sel_vars]))) +
+  geom_sf(data = aunz_sf, fill = "grey92", colour = NA) + geom_raster(aes(x, y, fill = v)) +
+  geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_manual(values = drv_col, name = "Most dissimilar\nvariable", drop = TRUE) + map_base + labs(tag = "b")
+p_clamp <- ggplot(map_df(list(c = drv[["370_2081-2100"]]$clamp_med), tibble(key = "c"))) +
+  geom_raster(aes(x, y, fill = value)) + geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_gradient2(low = "#2166ac", high = "#b2182b", name = "Clamped −\nunclamped") + map_base + labs(tag = "c")
+p_nov / (p_mod + p_clamp) + plot_layout(heights = c(1, 1.2))
+save_fig("FigS5_extrapolation_clamping", w = 13, h = 7)
+```
+Extrapolation and clamping. (a) Fraction of GCMs projecting climate outside the calibration range (MESS < 0) or novel combinations (NT2 > 1), 2081–2100. (b) Most dissimilar predictor in univariate-novel cells, SSP3-7.0 2081–2100 (ensemble-median climate). (c) Difference between clamped and unclamped suitability, SSP3-7.0 2081–2100 (median across GCMs); negative values indicate that clamping lowers suitability.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-drivervars}
+```{r}
+#| fig-width: 13
+#| fig-height: 7
+k_d <- "370_2081-2100"
+d_dv <- map_df(setNames(lapply(sel_vars, function(v) drv[[k_d]]$delta_med[, v]), sel_vars),
+               tibble(key = sel_vars, var = factor(var_lab[sel_vars], levels = var_lab[sel_vars])))
+ggplot(d_dv) + geom_raster(aes(x, y, fill = value)) + geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_gradient2(low = "#b2182b", high = "#2166ac", limits = c(-0.6, 0.6), oob = scales::squish, name = "Δ suitability") +
+  facet_wrap(~ var, nrow = 2) + map_base
+save_fig("FigS6_single_variable_effects", w = 13, h = 7)
+```
+Change in suitability when each predictor alone is changed to its future value (others at current values), SSP3-7.0 2081–2100, median across ten GCMs.
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-sens}
+```{r}
+#| fig-width: 12
+#| fig-height: 5
+bind_rows(set_cmp, thr_cmp) |>
+  mutate(ensemble = factor(ensemble, levels = c(names(gcm_sets), "Core ensemble, MSS threshold"))) |>
+  ggplot(aes(ensemble, med, colour = ensemble)) + geom_hline(yintercept = 0, colour = "grey60") +
+  geom_pointrange(aes(ymin = lo, ymax = hi)) + facet_grid(period ~ ssp_l) + coord_flip() +
+  scale_colour_manual(values = c("black", "#4393c3", "#d6604d", "grey50"), guide = "none") +
+  labs(x = NULL, y = "Change in suitable area, Australia + New Zealand (%)")
+save_fig("FigS7_sensitivity_ensemble_threshold", w = 12, h = 5)
+```
+Sensitivity of projected change in suitable area (Australia + New Zealand) to the GCM ensemble and threshold (points: median; bars: range across GCMs).
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-shift}
+```{r}
+#| fig-width: 12
+#| fig-height: 7
+shift <- core |> filter(unit %in% c("Australia", "New Zealand")) |>
+  group_by(unit, ssp_l, period) |>
+  summarise(lat = median(lat_centroid - lat_centroid_cur), lat_lo = min(lat_centroid - lat_centroid_cur), lat_hi = max(lat_centroid - lat_centroid_cur),
+            el = median(elev_mean - elev_mean_cur), el_lo = min(elev_mean - elev_mean_cur), el_hi = max(elev_mean - elev_mean_cur), .groups = "drop") |>
+  mutate(year = per_mid[as.character(period)])
+pl <- function(y, lo, hi, lab, tag) ggplot(shift, aes(year, .data[[y]], colour = ssp_l, fill = ssp_l)) +
+  geom_hline(yintercept = 0, colour = "grey60") + geom_ribbon(aes(ymin = .data[[lo]], ymax = .data[[hi]]), alpha = 0.12, colour = NA) +
+  geom_line() + geom_point(size = 1.2) + facet_wrap(~ unit, scales = "free_y") +
+  scale_colour_manual(values = ssp_col, name = NULL) + scale_fill_manual(values = ssp_col, name = NULL) +
+  scale_x_continuous(breaks = per_mid, labels = gsub("-", "–", periods)) + labs(x = NULL, y = lab, tag = tag)
+pl("lat", "lat_lo", "lat_hi", "Shift in latitude of suitable-area\ncentroid (degrees; negative = poleward)", "a") /
+  pl("el", "el_lo", "el_hi", "Change in mean elevation of\nsuitable area (m)", "b") + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+save_fig("FigS8_latitude_elevation_shift", w = 12, h = 7)
+```
+Shifts in (a) the area-weighted latitude centroid and (b) the mean elevation of climatically suitable area relative to current climate (median and range across ten GCMs).
+:::
+:::
+
+::: {.supp-figure}
+::: {#suppfig-sdmgcm}
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+k_s <- "245_2041-2060"
+bind_rows(
+  as.data.frame(aggregate(to_rast(ens_maps[[k_s]]$sd), 2, mean, na.rm = TRUE), xy = TRUE, na.rm = TRUE) |> mutate(src = "Among climate models (GCM SD)"),
+  as.data.frame(aggregate(to_rast(sdm_sd[[k_s]]), 2, mean, na.rm = TRUE), xy = TRUE, na.rm = TRUE) |> mutate(src = "Among SDM bootstrap replicates (SD)")) |>
+  ggplot() + geom_raster(aes(x, y, fill = value)) + geom_sf(data = aunz_sf, fill = NA, colour = "grey40", linewidth = 0.1) +
+  scale_fill_viridis_c(option = "viridis", name = "SD of\nsuitability", limits = c(0, NA)) + facet_wrap(~ src) + map_base
+save_fig("FigS9_uncertainty_SSP245_2041-2060", w = 12, h = 6)
+```
+Standard deviation of projected suitability among GCMs and among SDM bootstrap replicates for SSP2-4.5 2041–2060 (compare @fig-uncert b).
+:::
+:::
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+# Computational environment {.unnumbered .appendix}
+
+```{r}
+#| label: session-info
+#| cache: false
+key_results <- list(thr_p10 = thr_p10, pred_check = pred_check, refit_check = refit_check, cur_check = cur_check,
+                    ai_cor = ai_cor, envirem_check = envirem_check, gcm_meta = gcm_meta, ens_summ = ens_summ,
+                    summ_cur = summ_cur, known_cur = known_cur, vp = vp, drv_tab = drv_tab, mg_area = mg_area,
+                    set_cmp = set_cmp, thr_cmp = thr_cmp, v2_ai_stats = v2_ai_stats, area_v2_approx = area_v2_approx,
+                    area_true = area_true, clim_all = clim_all)
+saveRDS(key_results, file.path(out_dir, "key_results.rds"))
+sessionInfo()
+```
