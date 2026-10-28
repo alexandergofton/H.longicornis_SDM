@@ -11,3 +11,8 @@
 * New figures (workflow is a Mermaid diagram in the qmd): `figures_9/Fig7_change_synthesis.png`,
   `figures_9/FigS1_model_development.png`.
 * `references.bib`, `manuscript.css` — copied from code_8.
+* ODMAP protocol (Table S24) and data products (Table S25). Rendering also writes `outputs_9/`:
+  `rasters/` (cloud-optimised GeoTIFFs: current, 16 future SSP × period stacks, 0.25° establishment risk,
+  plus `raster_band_descriptions.csv`), `Hlongicornis_interactive_map.html` (standalone Leaflet map with all
+  layers; Esri satellite basemap tiles need internet; legends bottom left, layer control top right) and `ODMAP_Hlongicornis_Australia.csv`.
+* Figures 4, 6, 10 and 11 each have an interactive map directly beneath the static figure.

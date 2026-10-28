@@ -1,0 +1,16 @@
+File,Band,Description
+Hlongicornis_current_Australia.tif,suitability,"Consensus cloglog suitability, 1970–2000 climate"
+Hlongicornis_current_Australia.tif,suitable,Suitable (1) / unsuitable (0) at the 10th-percentile training-presence threshold (cloglog ≥ 0.400)
+Hlongicornis_current_Australia.tif,mess,Multivariate environmental similarity to calibration environments (< 0 = novel)
+Hlongicornis_current_Australia.tif,bootstrap_sd,Standard deviation of suitability across 30 bootstrap replicates
+Hlongicornis_current_Australia.tif,distance_known_km,Geodesic distance to the nearest known Australian record (km)
+Hlongicornis_current_Australia.tif,gap_class,0 unsuitable; 1 suitable within 100 km of a record; 2 suitable but unrecorded
+Hlongicornis_future_ssp<SSP>_<period>_Australia.tif (16 files),median_suitability,Median cloglog suitability across ten GCMs
+Hlongicornis_future_ssp<SSP>_<period>_Australia.tif (16 files),gcm_agreement,Proportion of GCMs projecting suitable climate
+Hlongicornis_future_ssp<SSP>_<period>_Australia.tif (16 files),gcm_sd,Standard deviation of suitability across GCMs
+Hlongicornis_future_ssp<SSP>_<period>_Australia.tif (16 files),frac_gcm_novel,Proportion of GCMs with novel climate (MESS < 0 or ExDet NT2 > 1)
+Hlongicornis_future_ssp<SSP>_<period>_Australia.tif (16 files),change_class,1–7: Unsuitable; Loss (robust); Loss (majority); Stable (robust); Stable (majority); Gain (majority); Gain (robust)
+Hlongicornis_future_ssp<SSP>_<period>_Australia.tif (16 files),management_category,1–6: Unsuitable; Emerging (possible); Emerging (robust); Persistent (robust); At risk (uncertain); Likely loss
+Hlongicornis_establishment_risk_0.25deg.tif,risk,Establishment risk under current climate relative to its maximum (uninfested units)
+Hlongicornis_establishment_risk_0.25deg.tif,pressure,"Introduction pressure with cattle from infested units, relative to its maximum"
+Hlongicornis_establishment_risk_0.25deg.tif,infested,1 = infested unit (suitable and within 100 km of a known record)

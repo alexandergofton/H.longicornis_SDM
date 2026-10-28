@@ -57,7 +57,10 @@ identical to the earlier Australia + New Zealand versions; only the projection d
 outputs that depend on it differ (Supplementary Methods S2). This document does not refit any model: every number, table and figure is read from
 the saved outputs of those analyses (`outputs_6–8/`, `processed_data_6–8/`, `figures_6–8/`, and
 `outputs_2–5/` for comparisons). It therefore renders in a few minutes. Three figures are new
-(workflow, synthesis of change, and model development; saved to `figures_9/`).
+(workflow, synthesis of change, and model development; saved to `figures_9/`). The model is
+documented with the ODMAP protocol (Table S24). Figures 4, 6, 10 and 11 are each followed by an
+interactive map of the same layers. The rasters and a standalone interactive map are exported to
+`outputs_9/` for use outside this document.
 
 Figures and tables proposed for the **main text** are boxed in
 <span style="color:#1b7837;font-weight:700">green</span>; **supplementary** figures and tables are boxed
@@ -74,6 +77,7 @@ suppressPackageStartupMessages({
   library(sf)
   library(rnaturalearth)
   library(patchwork)
+  library(leaflet)        # interactive maps
   library(knitr)
   library(tidyverse)      # loaded last so dplyr verbs take precedence
 })
@@ -579,6 +583,167 @@ Analyses were run in R 4.4 with `terra`, `sf`, `dismo` (MaxEnt 3.4), `predicts`,
 `matrixStats` and the `tidyverse`. Code for each component is embedded in the analysis reports
 (`code_6`, `code_7`, `code_8`); this manuscript reads their saved outputs.
 
+## Reporting standards and data products
+
+The model is documented with the ODMAP protocol (Overview, Data, Model, Assessment, Prediction)
+[@zurell2020] (@supptbl-odmap). The protocol is also exported as a table
+(`outputs_9/ODMAP_Hlongicornis_Australia.csv`). To make the results usable outside this paper, the main
+spatial outputs are released as cloud-optimised GeoTIFFs in WGS 84 at 2.5 arc-minutes, with a band-level
+description (@supptbl-products). For current climate these are continuous and binary suitability, MESS,
+bootstrap standard deviation, distance to the nearest known record and the surveillance-gap class. For
+each of the 16 SSP × period combinations they are ensemble-median suitability, GCM agreement, GCM
+standard deviation, the fraction of GCMs with novel climate, change class and management category.
+Establishment risk and introduction pressure are released on the 0.25° grid. Interactive maps of these
+layers follow the corresponding static figures (@fig-suit, @fig-change, @fig-mgmt and @fig-risk). All
+layers are also combined in a single self-contained interactive map
+(`outputs_9/Hlongicornis_interactive_map.html`) that can be opened locally or hosted on an agency web
+server.
+
+```{r}
+#| label: data-products
+#| code-summary: "Show code: export rasters and build interactive map layers"
+out9    <- file.path(base_dir, "outputs_9")
+ras_dir <- file.path(out9, "rasters")
+dir.create(ras_dir, recursive = TRUE, showWarnings = FALSE)
+thr <- kr6$thr_p10
+write_cog <- function(r, f) {               # cloud-optimised GeoTIFF where GDAL supports it
+  f <- file.path(ras_dir, f)
+  tryCatch(writeRaster(r, f, filetype = "COG", overwrite = TRUE, gdal = "COMPRESS=DEFLATE"),
+           error = function(e) writeRaster(r, f, overwrite = TRUE, gdal = "COMPRESS=DEFLATE"))
+}
+
+# ---- Current climate (code_6)
+cur   <- rast(file.path(base_dir, "processed_data_6", "suitability_current_aus.tif"))
+mess  <- rast(file.path(base_dir, "processed_data_6", "mess_current_aus.tif"))
+bsd   <- rast(file.path(base_dir, "processed_data_6", "suitability_bootstrap_sd_aus.tif"))
+known <- rc("processed_data_6", "known_records_aus.csv")
+bin   <- cur >= thr
+dkm   <- mask(distance(cur, vect(known, geom = c("lon", "lat"), crs = "EPSG:4326")) / 1000, cur)
+gap   <- ifel(bin == 0, 0, ifel(dkm <= 100, 1, 2))       # 0 unsuitable, 1 suitable near records, 2 suitable but unrecorded
+bincl <- (bin + 1) + 2 * (mess < 0)                      # 1 unsuitable, 2 suitable, 3/4 the same in novel climate
+cur_stack <- c(cur, bin, mess, bsd, dkm, gap)
+names(cur_stack) <- c("suitability", "suitable", "mess", "bootstrap_sd", "distance_known_km", "gap_class")
+write_cog(cur_stack, "Hlongicornis_current_Australia.tif")
+
+# ---- Future climate (code_7): add change class and management category to each ensemble stack
+chg_lab <- c("Unsuitable", "Loss (robust)", "Loss (majority)", "Stable (robust)", "Stable (majority)", "Gain (majority)", "Gain (robust)")
+chg_col <- c("grey90", "#b2182b", "#f4a582", "#2166ac", "#92c5de", "#a6dba0", "#1b7837")
+mg_lab  <- c("Unsuitable", "Emerging (possible)", "Emerging (robust)", "Persistent (robust)", "At risk (uncertain)", "Likely loss")
+mg_col  <- c("grey90", "#c2a5cf", "#762a83", "#1b7837", "#fdb863", "#d73027")
+fut_r <- list()
+for (ss in ssps) for (pp in periods) {
+  k <- paste0(ss, "_", pp)
+  r <- rast(file.path(base_dir, "processed_data_7", sprintf("ensemble_ssp%s.tif", k)))
+  a <- r[["gcm_agreement_suitable"]]
+  chg <- ifel(bin, ifel(a >= 0.8, 4, ifel(a >= 0.5, 5, ifel(a <= 0.2, 2, 3))), ifel(a >= 0.8, 7, ifel(a >= 0.5, 6, 1)))
+  mgc <- ifel(bin, ifel(a >= 0.8, 4, ifel(a <= 0.2, 6, 5)), ifel(a >= 0.8, 3, ifel(a >= 0.5, 2, 1)))
+  st <- c(r[[c("median_suitability", "gcm_agreement_suitable", "gcm_sd", "frac_gcm_novel")]], chg, mgc)
+  names(st) <- c("median_suitability", "gcm_agreement", "gcm_sd", "frac_gcm_novel", "change_class", "management_category")
+  write_cog(st, sprintf("Hlongicornis_future_ssp%s_%s_Australia.tif", ss, pp))
+  fut_r[[k]] <- st
+}
+
+# ---- Introduction pressure and establishment risk (code_8), 0.25-degree units
+u <- units8 |> transmute(x, y, risk = ifelse(infested, NA, risk_cur / max(risk_cur[!infested])),
+                         pressure = ifelse(infested, NA, pressure / max(pressure[!infested])), infested = as.integer(infested))
+risk_r <- rast(u, type = "xyz", crs = "EPSG:4326")
+write_cog(risk_r, "Hlongicornis_establishment_risk_0.25deg.tif")
+
+# ---- Band-level metadata
+products <- bind_rows(
+  tibble(File = "Hlongicornis_current_Australia.tif", Band = names(cur_stack),
+         Description = c("Consensus cloglog suitability, 1970–2000 climate",
+                         sprintf("Suitable (1) / unsuitable (0) at the 10th-percentile training-presence threshold (cloglog ≥ %.3f)", thr),
+                         "Multivariate environmental similarity to calibration environments (< 0 = novel)",
+                         "Standard deviation of suitability across 30 bootstrap replicates",
+                         "Geodesic distance to the nearest known Australian record (km)",
+                         "0 unsuitable; 1 suitable within 100 km of a record; 2 suitable but unrecorded")),
+  tibble(File = "Hlongicornis_future_ssp<SSP>_<period>_Australia.tif (16 files)", Band = names(fut_r[[1]]),
+         Description = c("Median cloglog suitability across ten GCMs",
+                         "Proportion of GCMs projecting suitable climate",
+                         "Standard deviation of suitability across GCMs",
+                         "Proportion of GCMs with novel climate (MESS < 0 or ExDet NT2 > 1)",
+                         paste0("1–7: ", paste(chg_lab, collapse = "; ")),
+                         paste0("1–6: ", paste(mg_lab, collapse = "; ")))),
+  tibble(File = "Hlongicornis_establishment_risk_0.25deg.tif", Band = names(risk_r),
+         Description = c("Establishment risk under current climate relative to its maximum (uninfested units)",
+                         "Introduction pressure with cattle from infested units, relative to its maximum",
+                         "1 = infested unit (suitable and within 100 km of a known record)")))
+write_csv(products, file.path(ras_dir, "raster_band_descriptions.csv"))
+
+# ---- Leaflet helpers (legends bottom left, layer control top right, so they never overlap;
+# each layer carries its own legend so only legends of visible layers are shown)
+states <- ne_states(country = "Australia", returnclass = "sf") |>
+  filter(!name %in% c("Lord Howe Island", "Macquarie Island")) |> st_simplify(dTolerance = 0.01)
+lf_base <- function() leaflet(options = leafletOptions(preferCanvas = TRUE)) |>
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
+  addPolylines(data = states, weight = 0.6, color = "#555555", opacity = 0.8) |>
+  fitBounds(112.5, -44, 154, -10) |>
+  leafem::addMouseCoordinates()
+lf_cat <- function(m, r, cols, labs, group, title, legend = TRUE) {
+  pal <- colorFactor(cols, domain = seq_along(cols), na.color = "transparent")
+  m <- m |> addRasterImage(r, colors = pal, opacity = 0.85, method = "ngb", group = group, maxBytes = 10e6)
+  if (legend) m <- m |> addLegend("bottomleft", colors = cols, labels = labs, title = title, group = group, opacity = 0.9)
+  m
+}
+lf_num <- function(m, r, pal, group, title, lab = labelFormat()) m |>
+  addRasterImage(r, colors = pal, opacity = 0.85, group = group, maxBytes = 10e6) |>
+  addLegend("bottomleft", pal = pal, values = values(r, na.rm = TRUE), title = title, group = group, labFormat = lab, opacity = 0.9)
+lf_known <- function(m) m |> addCircleMarkers(data = known, lng = ~lon, lat = ~lat, radius = 2, stroke = FALSE,
+                                              fillColor = "black", fillOpacity = 0.8, group = "Known records")
+lf_finish <- function(m, groups, show = groups[1]) m |>
+  addLayersControl(overlayGroups = groups,
+                   options = layersControlOptions(collapsed = FALSE)) |>
+  hideGroup(setdiff(groups, c(show, "Known records")))
+scen_name <- function(k) paste(ssp_lab[sub("_.*", "", k)], gsub("-", "–", sub(".*_", "", k)))
+
+# Layer sets, each a function adding layers to a map
+pal_suit <- colorNumeric(viridisLite::magma(256, direction = -1), domain = c(0, 1), na.color = "transparent")
+g_cur <- c("Current: suitability", "Current: suitable / unsuitable", "Current: suitable but unrecorded", "Current: bootstrap SD")
+add_current <- function(m) m |>
+  lf_num(cur, pal_suit, g_cur[1], "Suitability<br>(cloglog)") |>
+  lf_cat(bincl, c("grey88", "#2166ac", "#f6e8c3", "#92c5de"),
+         c("Unsuitable", "Suitable", "Unsuitable (novel climate)", "Suitable (novel climate)"), g_cur[2], "Current climate") |>
+  lf_cat(gap + 1, c("grey88", "#4393c3", "#d6604d"), c("Unsuitable", "Suitable, ≤ 100 km from records", "Suitable, > 100 km from records"),
+         g_cur[3], "Relative to known records") |>
+  lf_num(bsd, colorNumeric("viridis", domain = range(values(bsd), na.rm = TRUE), na.color = "transparent"), g_cur[4], "Bootstrap SD")
+k_chg <- paste0(rep(ssps, each = 2), "_", c("2041-2060", "2081-2100"))
+g_chg <- paste("Change:", scen_name(k_chg))
+add_change <- function(m) {
+  for (i in seq_along(k_chg)) m <- lf_cat(m, fut_r[[k_chg[i]]][["change_class"]], chg_col, chg_lab, g_chg[i],
+                                          paste0(scen_name(k_chg[i]), "<br>change vs. 1970–2000<br>(agreement of 10 GCMs)"))
+  m
+}
+focal <- c("245_2041-2060", "370_2081-2100")
+g_mg <- paste("Management:", scen_name(focal))
+add_mgmt <- function(m) {
+  for (i in seq_along(focal)) m <- lf_cat(m, fut_r[[focal[i]]][["management_category"]], mg_col, mg_lab, g_mg[i],
+                                          paste0("Management category<br>", scen_name(focal[i])))
+  m
+}
+pal_log <- colorNumeric(viridisLite::inferno(256), domain = c(-4, 0), na.color = "transparent")
+log_r   <- function(r) clamp(log10(r), -4, 0, values = TRUE)
+g_risk  <- c("Risk: establishment risk", "Risk: introduction pressure", "Risk: infested units", "Risk: surveillance visits (250)")
+add_risk <- function(m) {
+  vis <- filter(cand8, visits > 0)
+  m |> lf_num(log_r(risk_r[["risk"]]), pal_log, g_risk[1], "Establishment risk<br>(relative)", labelFormat(transform = function(x) 10^x)) |>
+    lf_num(log_r(risk_r[["pressure"]]), pal_log, g_risk[2], "Introduction pressure<br>(relative)", labelFormat(transform = function(x) 10^x)) |>
+    lf_cat(ifel(risk_r[["infested"]] == 1, 1, NA), "grey45", "Infested unit", g_risk[3], "Infested units") |>
+    addCircleMarkers(data = vis, lng = ~x, lat = ~y, radius = ~ 2 + 2 * sqrt(visits), color = "#762a83", weight = 1,
+                     fillOpacity = 0.6, group = g_risk[4],
+                     popup = ~ sprintf("<b>%s</b><br>%.2f°E, %.2f°S<br>Visits: %d<br>Prior: %.3f<br>Posterior if negative: %.3f<br>Cattle: %s",
+                                       jur, x, -y, visits, pi, post, format(round(cattle), big.mark = ",")))
+}
+
+# ---- Standalone map with all layers
+all_groups <- c(g_cur, g_chg, g_mg, g_risk, "Known records")
+lf_all <- lf_base() |> add_current() |> add_change() |> add_mgmt() |> add_risk() |> lf_known() |>
+  lf_finish(all_groups)
+htmlwidgets::saveWidget(lf_all, file.path(out9, "Hlongicornis_interactive_map.html"), selfcontained = TRUE,
+                        title = "Haemaphysalis longicornis: climatic suitability in Australia")
+unlink(file.path(out9, "Hlongicornis_interactive_map_files"), recursive = TRUE)
+```
+
 # Results
 
 ## Model selection and transferability
@@ -681,6 +846,13 @@ were almost unchanged with a uniform rather than bias-corrected background (Spea
 #| fig-cap: "Current climatic suitability for *H. longicornis* in continental Australia and Tasmania. (a) Consensus cloglog suitability with known Australian records (training and ALA records; black points). (b) Binary suitability at the 10th-percentile training-presence threshold; pale colours mark cells with climate outside the calibration range (MESS < 0)."
 fig(6, "Fig3_current_suitability.png")
 ```
+
+*Interactive version. Use the panel at top right to switch layers (shown over an Esri satellite basemap); legends for the visible layers are at bottom left; coordinates are shown at the pointer.*
+
+```{r}
+#| label: map-current
+lf_base() |> add_current() |> lf_known() |> lf_finish(c(g_cur, "Known records"))
+```
 :::
 
 ## Niche conservatism between native and invaded ranges
@@ -737,6 +909,13 @@ towards the south-east and to higher ground. By 2081–2100 its centroid moves
 #| label: fig-change
 #| fig-cap: "Projected change in climatically suitable area relative to 1970–2000 for each emissions scenario (columns) in 2041–2060 and 2081–2100 (rows). Stable, loss and gain classes use the majority of ten GCMs; *robust* indicates agreement of at least 80% of GCMs. Ensemble-median suitability maps are in @suppfig-futsuit and @suppfig-otherperiods."
 fig(7, "Fig3_range_change.png")
+```
+
+*Interactive version. Use the panel at top right to switch layers (shown over an Esri satellite basemap); legends for the visible layers are at bottom left; coordinates are shown at the pointer.*
+
+```{r}
+#| label: map-change
+lf_base() |> add_change() |> lf_known() |> lf_finish(c(g_chg, "Known records"), show = g_chg[3])
 ```
 :::
 
@@ -984,6 +1163,13 @@ visits under the primary model, a result that depends on the assumed difficulty 
 #| fig-cap: "Management categories derived from current suitability and GCM agreement for SSP2-4.5 2041–2060 and SSP3-7.0 2081–2100. *Persistent*: suitable now and in ≥ 80% of GCMs; *at risk*: suitable now and in 20–80%; *likely loss*: suitable now and in ≤ 20%; *emerging (robust)*: unsuitable now, suitable in ≥ 80%; *emerging (possible)*: 50–80%. Black points are known records."
 fig(7, "Fig7_management_categories.png")
 ```
+
+*Interactive version. Use the panel at top right to switch layers (shown over an Esri satellite basemap); legends for the visible layers are at bottom left; coordinates are shown at the pointer.*
+
+```{r}
+#| label: map-mgmt
+lf_base() |> add_mgmt() |> lf_known() |> lf_finish(c(g_mg, "Known records"))
+```
 :::
 
 ::: {.primary-figure}
@@ -1002,6 +1188,14 @@ fig(8, "Fig6_surveillance_design.png")
 
 From climatic suitability to surveillance: introduction pressure, establishment risk and the optimal allocation of surveillance effort.
 :::
+
+*Interactive version. Use the panel at top right to switch layers (shown over an Esri satellite basemap); legends for the visible layers are at bottom left; coordinates are shown at the pointer; click a surveillance unit for its allocation and prior and posterior probabilities.*
+
+```{r}
+#| label: map-risk
+lf_base() |> add_risk() |> lf_known() |> lf_finish(c(g_risk, "Known records"), show = c(g_risk[1], g_risk[3], g_risk[4])) |>
+  fitBounds(134, -44, 154, -24)
+```
 :::
 
 # Discussion
@@ -1182,8 +1376,9 @@ tick in Australia during the twentieth century and in the United States since 20
 the model predicts change over time as well as pattern in space [@yates2018]. Structured surveys in at-risk and
 unrecorded areas would provide true absences. Third, weighting GCMs by regional skill, using regionally
 downscaled projections and linking exposure estimates to herd-level theileriosis data would reduce the
-largest remaining uncertainties. Reporting the model with the ODMAP protocol [@zurell2020] and publishing the
-rasters through an interactive map would make the results easier for agencies to adopt.
+largest remaining uncertainties. To help agencies adopt the results, the model is reported with the ODMAP
+protocol [@zurell2020] and its rasters are released as GeoTIFFs and as an interactive map. Hosting these on
+an agency platform, and updating them as surveillance data accrue, is the natural next step.
 
 ## Conclusions
 
@@ -1207,7 +1402,10 @@ Occurrence data are from GBIF, ALA, @rochlin2019 and @zhang2019. Climate data ar
 ENVIREM and CHELSA; livestock from GLW3; population from GPW v4; irrigation from GMIA v5; land cover from ESA
 WorldCover. All code is embedded in the analysis reports in `code_6/`, `code_7/` and `code_8/`, and
 model outputs (rasters, tables and fitted model objects) are in the corresponding `processed_data_*/`
-and `outputs_*/` folders.
+and `outputs_*/` folders. The released spatial products are in `outputs_9/`: cloud-optimised GeoTIFFs with
+band descriptions in `rasters/` (@supptbl-products), the standalone interactive map
+`Hlongicornis_interactive_map.html`, and the ODMAP protocol `ODMAP_Hlongicornis_Australia.csv`
+(@supptbl-odmap).
 
 # References {.unnumbered}
 
@@ -1367,6 +1565,15 @@ The 20-year windows in which each CMIP6 simulation first reaches 1.0, 1.2, 1.5, 
 period was interpolated between window centres. For periods after a simulation's last tabulated crossing
 (for example SSP1-2.6 after warming stabilises), the warming level was estimated from a per-GCM linear
 regression of warming level on projected mean warming over Australian land (@suppfig-gwlmap).
+
+### S9. ODMAP protocol and data products {.unnumbered}
+
+The model is reported with the ODMAP protocol (Overview, Data, Model, Assessment, Prediction)
+[@zurell2020]. @supptbl-odmap gives every ODMAP element, completed from the analyses reported here, with
+cross-references to the relevant sections, figures and tables. The released rasters are listed band by band in
+@supptbl-products. All released rasters share the 2.5′ grid of the projection domain (continental
+Australia and Tasmania; 112–154°E, 9–44°S; WGS 84), except establishment risk, which uses the 0.25° grid
+of the gravity model. Cells outside the domain are NA.
 
 ## Supplementary tables
 
@@ -1680,6 +1887,81 @@ kr8$gwl_year |> transmute(Scenario = ssp_lab[ssp], `Warming level (°C)` = warmi
                           `Median year` = round(year_med), Range = sprintf("%d–%d", round(year_lo), round(year_hi))) |> kable()
 ```
 Timing of global warming levels (centre of the 20-year crossing window) in the ten core GCMs [@hauser2022].
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-odmap}
+```{r}
+reg_n <- table(occ$region)
+gcm_core <- kr7$gcm_meta$gcm[kr7$gcm_meta$core]
+mem_txt <- paste(map_chr(kr6$members, ~ sprintf("set %s (%s; %s, β = %s)", .x$set, paste(.x$vars, collapse = ", "), .x$fc, .x$rm)), collapse = "; ")
+odmap <- tribble(
+  ~Section, ~Element, ~Description,
+  # ---------------- OVERVIEW
+  "Overview", "Authorship", "Alexander W. Gofton (CSIRO). Title: Climate change will contract, but not eliminate, the Australian range of the Asian longhorned tick, Haemaphysalis longicornis.",
+  "Overview", "Model objective", "Mapping and transfer. Estimate current climatic suitability across continental Australia and Tasmania from a model calibrated across the native and invaded ranges (transfer in space), and project it to future climates (transfer in time). Outputs inform surveillance and livestock risk management.",
+  "Overview", "Target output", "Continuous relative climatic suitability (cloglog) and binary suitable/unsuitable maps; ensemble change classes and management categories for future scenarios.",
+  "Overview", "Focal taxon", "Haemaphysalis longicornis Neumann, 1901 (Acari: Ixodidae). Only the parthenogenetic lineage occurs in Australia; native-range records pool bisexual and parthenogenetic populations.",
+  "Overview", "Location", "Calibration: accessible area M (1,000-km buffers around records) in East Asia, eastern North America and Oceania (Australia, New Zealand, south-west Pacific). Projection: continental Australia and Tasmania, excluding Lord Howe and Macquarie Islands and external territories.",
+  "Overview", "Scale of analysis", "Spatial resolution 2.5 arc-minutes (about 4.6 km); extent 112–154°E, 9–44°S for projections. Temporal: 1970–2000 baseline; future periods 2021–2040, 2041–2060, 2061–2080, 2081–2100.",
+  "Overview", "Biodiversity data", "Presence-only occurrence records.",
+  "Overview", "Type of predictors", "Climatic: bioclimatic variables (temperature, precipitation), Thornthwaite aridity index; candidates also included PET, climatic moisture index and VPD.",
+  "Overview", "Conceptual model / hypotheses", "Off-host survival and development of ixodid ticks are governed by temperature (development, questing, overwinter survival) and atmospheric moisture balance (desiccation of non-feeding stages). Each candidate predictor set spans thermal regime or limits, temperature variability, moisture supply and desiccation stress.",
+  "Overview", "Assumptions", "Climatic niche conserved between native and invaded ranges and through time (tested for space: niche equivalency/similarity); native and Oceanian populations near equilibrium with climate (North American population still spreading); target-group background corrects sampling bias; no evolutionary adaptation within the projection horizon; delta-downscaled mean climate adequately represents future change.",
+  "Overview", "SDM algorithms", "MaxEnt 3.4 (maxent.jar via dismo). Chosen over GLM, GAM, BRT, down-sampled random forest and ensembles because it had the lowest transfer omission and best transfer calibration (Supplementary Methods S1; Table S3). Final model: unweighted consensus of three MaxEnt configurations.",
+  "Overview", "Model workflow", "Figure 1: data → region-balanced background → a priori predictor sets × MaxEnt settings → selection by leave-one-region-out and spatial-block CV → consensus + bootstrap → current and future projection → management translation.",
+  "Overview", "Software, code and data availability", paste0("R ", R.version$major, ".", R.version$minor, "; terra, sf, dismo (MaxEnt 3.4), predicts, ecospat, envirem, tidyverse. Code embedded in code_6, code_7, code_8; outputs in outputs_6–9 and processed_data_6–8; rasters released in outputs_9/rasters (Table S25)."),
+  # ---------------- DATA
+  "Data", "Taxon names / taxonomic reference", "Haemaphysalis longicornis as recorded in GBIF backbone, ALA and source publications; no synonyms merged.",
+  "Data", "Ecological level", "Occurrences (presence of populations at localities).",
+  "Data", "Data sources", "GBIF; Atlas of Living Australia (download 2026-02-04); Rochlin (2019) compilation for North America and the Pacific; Zhang et al. (2019) for China.",
+  "Data", "Sampling design", "Opportunistic records and published surveys; no designed sampling.",
+  "Data", "Sample size", sprintf("%d records after thinning and stratification: East Asia %d, North America %d, Oceania %d (Australia %d). %d known Australian records (training + ALA) used for gap analysis.", kr6$n_occ, reg_n[["East_Asia"]], reg_n[["North_America"]], reg_n[["Oceania"]], aus_eval$n, kr6$n_known_aus),
+  "Data", "Clipping / scaling", "Spatially thinned to ≥ 10 km; regionally stratified so no region exceeds 35% of records (random subsampling of East Asian records). One Himalayan record assigned to East Asia.",
+  "Data", "Cleaning", "Records without coordinates and duplicate localities removed.",
+  "Data", "Absence data", "None.",
+  "Data", "Background data", "10,000 points within M, allocated among regions by land area and drawn within regions by a target-group sampling-effort surface (GBIF Ixodidae + Zhang et al. 2019; Gaussian kernel σ = 1°, normalised within region, floor 0.02). Independent 10,000 uniform points for evaluation; uniform background for sensitivity.",
+  "Data", "Errors and biases", "Strong regional sampling imbalance (target-group records dominated by North America) corrected by region-normalised bias surface; sensitivity to a uniform background reported (Figure S10). North American records do not represent equilibrium.",
+  "Data", "Data partitioning", "Leave-one-region-out (3 folds: East Asia, North America, Oceania) and spatial blocks (5° × 5° blocks, 5 folds). Australian records evaluated separately with the Oceania-withheld model. No external independent dataset.",
+  "Data", "Predictor variables", paste0("19 candidates: WorldClim 2.1 BIO1–7, BIO10–17; ENVIREM PET, Thornthwaite aridity index, climatic moisture index; CHELSA v2.1 mean annual VPD. Used in final model: ", paste(kr6$sel_vars, collapse = ", "), "."),
+  "Data", "Predictor sources, extent, resolution, CRS", "Global, 2.5 arc-minutes, WGS 84. CHELSA VPD aggregated from 30″.",
+  "Data", "Predictor temporal extent", "WorldClim 2.1 1970–2000; ENVIREM built on an earlier WorldClim baseline; CHELSA 1981–2010.",
+  "Data", "Predictor processing and errors", "BIO8, BIO9, BIO18, BIO19 excluded (discontinuities). Baseline mismatch between ENVIREM and WorldClim 2.1 handled by applying future aridity change as an anomaly (S3).",
+  "Data", "Transfer data", paste0("WorldClim 2.1 CMIP6 downscaled monthly Tmin, Tmax, precipitation; GCMs: ", paste(gcm_core, collapse = ", "), " (ECS 2–5 K; one per family); SSP1-2.6, SSP2-4.5, SSP3-7.0, SSP5-8.5; four 20-year periods. Bioclim variables recomputed from monthly data; aridity from Hargreaves PET applied as anomaly."),
+  "Data", "Novel environments in transfer data", "MESS (univariate) and ExDet NT2 (combinations) for current and every future scenario; clamped vs. unclamped predictions compared (Figure S18, Table S12).",
+  # ---------------- MODEL
+  "Model", "Variable pre-selection", "Ten predictor sets defined a priori on physiological grounds (Table S4); set A reproduces stepwise-VIF selection.",
+  "Model", "Multicollinearity", "All sets |Spearman ρ| ≤ 0.75 and VIF < 5 across M (evaluation background).",
+  "Model", "Model complexity / settings", paste0("Features L, LQ, LQH, LQHP × β = 0.5–8 tuned per set; threshold features off; clamping on; cloglog output; 10,000 background points. Selected members: ", mem_txt, "; non-zero features ", paste(kr6$n_feat, collapse = ", "), "."),
+  "Model", "Model selection", "Sequential: omission filter (mean LORO OR10 ≤ 0.30 and block OR10 ≤ 0.20), then lowest rank sum of LORO and block AUC and CBI.",
+  "Model", "Model averaging / ensembles", "Unweighted mean cloglog of the three top predictor-set configurations (consensus); evaluated with all members refitted in each fold.",
+  "Model", "Model estimates", "MaxEnt permutation importance per member; consensus marginal response curves with 95% bootstrap intervals (Figure 3).",
+  "Model", "Non-independence", "10-km thinning; spatially structured cross-validation (region and block).",
+  "Model", "Threshold selection", sprintf("10th-percentile training presence of the consensus (cloglog = %.3f); maximum sensitivity + specificity (%.3f) as sensitivity analysis (Table S6).", kr6$thr_p10, kr6$thr_mss),
+  # ---------------- ASSESSMENT
+  "Assessment", "Performance statistics", sprintf("AUC, continuous Boyce index, OR10. Mean LORO AUC %.2f, CBI %.2f, OR10 %.2f; block AUC %.2f, CBI %.2f, OR10 %.2f; Australia with Oceania withheld AUC %.2f, OR10 %.2f (Table 1, Table S5).", cvs$loro_auc, cvs$loro_cbi, cvs$loro_or10, cvs$blk_auc, cvs$blk_cbi, cvs$blk_or10, aus_eval$auc, aus_eval$or10),
+  "Assessment", "Plausibility checks", "Response curves consistent with tick physiology; global projection reproduces native and North American ranges (Figure S6); niche equivalency/similarity tests (Table S7); agreement with an independent process-based life-cycle model built from laboratory parameters (Figure 9, Table S18).",
+  # ---------------- PREDICTION
+  "Prediction", "Prediction output", "Continuous cloglog suitability and binary maps (current); per-GCM binary maps summarised as ensemble median, GCM agreement, change classes and management categories (future). Areas from true cell areas.",
+  "Prediction", "Uncertainty: algorithm", "Single algorithm; predictor-set uncertainty propagated through the three-member consensus; algorithm comparison reported (Table S3).",
+  "Prediction", "Uncertainty: input data and parameters", "30 bootstrap resamples of presences within regions (Figure S8); background sensitivity (Figure S10); threshold sensitivity (Table S6).",
+  "Prediction", "Uncertainty: scenarios", "10 GCMs × 4 SSPs × 4 periods; ANOVA partitioning among SSP, GCM and SDM bootstrap (Table S13); alternative GCM ensembles (Table S15); results also expressed at global warming levels (Table 4).",
+  "Prediction", "Novel environments", "MESS, ExDet NT2 and clamping effects mapped; suitable area reported with and without novel climate (Table S12)."
+)
+write_csv(odmap, file.path(out9, "ODMAP_Hlongicornis_Australia.csv"))
+kable(odmap)
+```
+ODMAP protocol [@zurell2020] for the consensus species distribution model of *H. longicornis*. Also provided as `outputs_9/ODMAP_Hlongicornis_Australia.csv`.
+:::
+:::
+
+::: {.supp-table}
+::: {#supptbl-products}
+```{r}
+kable(products)
+```
+Released spatial data products (`outputs_9/rasters/`; cloud-optimised GeoTIFF, WGS 84). Band descriptions are also provided as `raster_band_descriptions.csv`. Future files exist for each SSP (126, 245, 370, 585) and period (2021-2040 to 2081-2100).
 :::
 :::
 

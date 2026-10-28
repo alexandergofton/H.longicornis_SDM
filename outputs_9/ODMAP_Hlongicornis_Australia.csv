@@ -1,0 +1,46 @@
+Section,Element,Description
+Overview,Authorship,"Alexander W. Gofton (CSIRO). Title: Climate change will contract, but not eliminate, the Australian range of the Asian longhorned tick, Haemaphysalis longicornis."
+Overview,Model objective,"Mapping and transfer. Estimate current climatic suitability across continental Australia and Tasmania from a model calibrated across the native and invaded ranges (transfer in space), and project it to future climates (transfer in time). Outputs inform surveillance and livestock risk management."
+Overview,Target output,Continuous relative climatic suitability (cloglog) and binary suitable/unsuitable maps; ensemble change classes and management categories for future scenarios.
+Overview,Focal taxon,"Haemaphysalis longicornis Neumann, 1901 (Acari: Ixodidae). Only the parthenogenetic lineage occurs in Australia; native-range records pool bisexual and parthenogenetic populations."
+Overview,Location,"Calibration: accessible area M (1,000-km buffers around records) in East Asia, eastern North America and Oceania (Australia, New Zealand, south-west Pacific). Projection: continental Australia and Tasmania, excluding Lord Howe and Macquarie Islands and external territories."
+Overview,Scale of analysis,"Spatial resolution 2.5 arc-minutes (about 4.6 km); extent 112–154°E, 9–44°S for projections. Temporal: 1970–2000 baseline; future periods 2021–2040, 2041–2060, 2061–2080, 2081–2100."
+Overview,Biodiversity data,Presence-only occurrence records.
+Overview,Type of predictors,"Climatic: bioclimatic variables (temperature, precipitation), Thornthwaite aridity index; candidates also included PET, climatic moisture index and VPD."
+Overview,Conceptual model / hypotheses,"Off-host survival and development of ixodid ticks are governed by temperature (development, questing, overwinter survival) and atmospheric moisture balance (desiccation of non-feeding stages). Each candidate predictor set spans thermal regime or limits, temperature variability, moisture supply and desiccation stress."
+Overview,Assumptions,Climatic niche conserved between native and invaded ranges and through time (tested for space: niche equivalency/similarity); native and Oceanian populations near equilibrium with climate (North American population still spreading); target-group background corrects sampling bias; no evolutionary adaptation within the projection horizon; delta-downscaled mean climate adequately represents future change.
+Overview,SDM algorithms,"MaxEnt 3.4 (maxent.jar via dismo). Chosen over GLM, GAM, BRT, down-sampled random forest and ensembles because it had the lowest transfer omission and best transfer calibration (Supplementary Methods S1; Table S3). Final model: unweighted consensus of three MaxEnt configurations."
+Overview,Model workflow,Figure 1: data → region-balanced background → a priori predictor sets × MaxEnt settings → selection by leave-one-region-out and spatial-block CV → consensus + bootstrap → current and future projection → management translation.
+Overview,"Software, code and data availability","R 4.4.1; terra, sf, dismo (MaxEnt 3.4), predicts, ecospat, envirem, tidyverse. Code embedded in code_6, code_7, code_8; outputs in outputs_6–9 and processed_data_6–8; rasters released in outputs_9/rasters (Table S25)."
+Data,Taxon names / taxonomic reference,"Haemaphysalis longicornis as recorded in GBIF backbone, ALA and source publications; no synonyms merged."
+Data,Ecological level,Occurrences (presence of populations at localities).
+Data,Data sources,GBIF; Atlas of Living Australia (download 2026-02-04); Rochlin (2019) compilation for North America and the Pacific; Zhang et al. (2019) for China.
+Data,Sampling design,Opportunistic records and published surveys; no designed sampling.
+Data,Sample size,"389 records after thinning and stratification: East Asia 215, North America 53, Oceania 121 (Australia 66). 71 known Australian records (training + ALA) used for gap analysis."
+Data,Clipping / scaling,Spatially thinned to ≥ 10 km; regionally stratified so no region exceeds 35% of records (random subsampling of East Asian records). One Himalayan record assigned to East Asia.
+Data,Cleaning,Records without coordinates and duplicate localities removed.
+Data,Absence data,None.
+Data,Background data,"10,000 points within M, allocated among regions by land area and drawn within regions by a target-group sampling-effort surface (GBIF Ixodidae + Zhang et al. 2019; Gaussian kernel σ = 1°, normalised within region, floor 0.02). Independent 10,000 uniform points for evaluation; uniform background for sensitivity."
+Data,Errors and biases,Strong regional sampling imbalance (target-group records dominated by North America) corrected by region-normalised bias surface; sensitivity to a uniform background reported (Figure S10). North American records do not represent equilibrium.
+Data,Data partitioning,"Leave-one-region-out (3 folds: East Asia, North America, Oceania) and spatial blocks (5° × 5° blocks, 5 folds). Australian records evaluated separately with the Oceania-withheld model. No external independent dataset."
+Data,Predictor variables,"19 candidates: WorldClim 2.1 BIO1–7, BIO10–17; ENVIREM PET, Thornthwaite aridity index, climatic moisture index; CHELSA v2.1 mean annual VPD. Used in final model: bio1, bio2, bio12, bio13, bio15, bio17, aridity_idx."
+Data,"Predictor sources, extent, resolution, CRS","Global, 2.5 arc-minutes, WGS 84. CHELSA VPD aggregated from 30″."
+Data,Predictor temporal extent,WorldClim 2.1 1970–2000; ENVIREM built on an earlier WorldClim baseline; CHELSA 1981–2010.
+Data,Predictor processing and errors,"BIO8, BIO9, BIO18, BIO19 excluded (discontinuities). Baseline mismatch between ENVIREM and WorldClim 2.1 handled by applying future aridity change as an anomaly (S3)."
+Data,Transfer data,"WorldClim 2.1 CMIP6 downscaled monthly Tmin, Tmax, precipitation; GCMs: ACCESS-CM2, ACCESS-ESM1-5, CMCC-ESM2, CNRM-ESM2-1, EC-Earth3-Veg, GISS-E2-1-G, IPSL-CM6A-LR, MIROC6, MPI-ESM1-2-HR, MRI-ESM2-0 (ECS 2–5 K; one per family); SSP1-2.6, SSP2-4.5, SSP3-7.0, SSP5-8.5; four 20-year periods. Bioclim variables recomputed from monthly data; aridity from Hargreaves PET applied as anomaly."
+Data,Novel environments in transfer data,"MESS (univariate) and ExDet NT2 (combinations) for current and every future scenario; clamped vs. unclamped predictions compared (Figure S18, Table S12)."
+Model,Variable pre-selection,Ten predictor sets defined a priori on physiological grounds (Table S4); set A reproduces stepwise-VIF selection.
+Model,Multicollinearity,All sets |Spearman ρ| ≤ 0.75 and VIF < 5 across M (evaluation background).
+Model,Model complexity / settings,"Features L, LQ, LQH, LQHP × β = 0.5–8 tuned per set; threshold features off; clamping on; cloglog output; 10,000 background points. Selected members: set H (bio1, bio12, bio15, aridity_idx; LQ, β = 3); set C (bio1, bio2, bio12, bio15, aridity_idx; LQ, β = 2); set G (bio1, bio2, bio13, bio17, aridity_idx; LQH, β = 4); non-zero features 6, 8, 29."
+Model,Model selection,"Sequential: omission filter (mean LORO OR10 ≤ 0.30 and block OR10 ≤ 0.20), then lowest rank sum of LORO and block AUC and CBI."
+Model,Model averaging / ensembles,Unweighted mean cloglog of the three top predictor-set configurations (consensus); evaluated with all members refitted in each fold.
+Model,Model estimates,MaxEnt permutation importance per member; consensus marginal response curves with 95% bootstrap intervals (Figure 3).
+Model,Non-independence,10-km thinning; spatially structured cross-validation (region and block).
+Model,Threshold selection,10th-percentile training presence of the consensus (cloglog = 0.400); maximum sensitivity + specificity (0.463) as sensitivity analysis (Table S6).
+Assessment,Performance statistics,"AUC, continuous Boyce index, OR10. Mean LORO AUC 0.86, CBI 0.81, OR10 0.27; block AUC 0.82, CBI 0.84, OR10 0.18; Australia with Oceania withheld AUC 0.94, OR10 0.47 (Table 1, Table S5)."
+Assessment,Plausibility checks,"Response curves consistent with tick physiology; global projection reproduces native and North American ranges (Figure S6); niche equivalency/similarity tests (Table S7); agreement with an independent process-based life-cycle model built from laboratory parameters (Figure 9, Table S18)."
+Prediction,Prediction output,"Continuous cloglog suitability and binary maps (current); per-GCM binary maps summarised as ensemble median, GCM agreement, change classes and management categories (future). Areas from true cell areas."
+Prediction,Uncertainty: algorithm,Single algorithm; predictor-set uncertainty propagated through the three-member consensus; algorithm comparison reported (Table S3).
+Prediction,Uncertainty: input data and parameters,30 bootstrap resamples of presences within regions (Figure S8); background sensitivity (Figure S10); threshold sensitivity (Table S6).
+Prediction,Uncertainty: scenarios,"10 GCMs × 4 SSPs × 4 periods; ANOVA partitioning among SSP, GCM and SDM bootstrap (Table S13); alternative GCM ensembles (Table S15); results also expressed at global warming levels (Table 4)."
+Prediction,Novel environments,"MESS, ExDet NT2 and clamping effects mapped; suitable area reported with and without novel climate (Table S12)."
